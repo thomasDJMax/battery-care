@@ -31,7 +31,7 @@ open ../电池管家.app
 - `AppModel.swift`：持久化偏好、通知、登录项、充电控制与临时上限恢复。
 - `BatteryMonitor.swift`：后台 IOKit 采样、功率历史、固定参数进程 CPU 查询与应用图标。
 - `BatteryTemperature.swift`：区分摄氏度与百分之一摄氏度，校验实时温度并过滤缺失／异常值。
-- `StatusReadout.swift`：电池内部闪电标志、充电状态绿色图标与文字绘制；非充电读数保留系统自动对比度。
+- `StatusReadout.swift`：电池内部闪电标志、充电状态绿色图标与文字绘制；未充电图标也使用相同绿色，非充电文字保留系统自动对比度。
 - `DesignSystem.swift`：截图中的颜色、材质、卡片、图标、开关、分段控件。
 - `SettingsView.swift`：六个设置页面。
 - `DashboardView.swift`：实时仪表盘、快捷养护、电池详情与控制能力说明。

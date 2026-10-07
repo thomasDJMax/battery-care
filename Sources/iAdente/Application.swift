@@ -119,10 +119,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         var image = NSImage(systemSymbolName: symbol, accessibilityDescription: "电池")?
             .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 16, weight: .medium))
         if coordinator.settings.useColors {
-            let color: NSColor
-            if (snapshot.percentage ?? 100) <= 20 && !snapshot.isPluggedIn { color = .systemOrange }
-            else if snapshot.isPluggedIn { color = .systemBlue }
-            else { color = .systemBlue }
+            let color = StatusReadout.batteryGreen
             if powerConnected { image = StatusReadout.powerConnectedBattery(color: color) }
             else { image = image?.withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [color])) }
             image?.isTemplate = false

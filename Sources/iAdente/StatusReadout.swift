@@ -3,6 +3,7 @@ import AppKit
 @MainActor
 enum StatusReadout {
     static let batterySize = NSSize(width: 24, height: 16)
+    static let batteryGreen = NSColor(calibratedRed: 0.18, green: 0.84, blue: 0.50, alpha: 1)
 
     /// The bolt is drawn inside the battery body so it stays recognizable at
     /// menu bar size, including when the battery is full on external power.
@@ -42,7 +43,7 @@ enum StatusReadout {
     /// A non-template image retains the requested charging green through menu
     /// bar vibrancy. The normal readout continues to use native title contrast.
     static func chargingImage(text: String) -> NSImage {
-        let green = NSColor(calibratedRed: 0.18, green: 0.84, blue: 0.50, alpha: 1)
+        let green = batteryGreen
         let font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
         let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: green]
         let string = NSAttributedString(string: text, attributes: attributes)
