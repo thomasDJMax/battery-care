@@ -15,8 +15,9 @@ struct SettingsView: View {
         self.settings = coordinator.settings
         self.monitor = coordinator.monitor
         self.charge = coordinator.charge
-        let draft = coordinator.settings.limit
-        self._selectedChargeLimit = State(initialValue: Self.validLimit(draft))
+        let draft = ChargeLimitOptions(coordinator.charge.availableLimits).nearest(to: coordinator.settings.limit)
+            ?? coordinator.charge.currentLimit ?? 100
+        self._selectedChargeLimit = State(initialValue: Double(draft))
     }
 
     var body: some View {
@@ -31,7 +32,16 @@ struct SettingsView: View {
             }
         }
         .onChange(of: coordinator.selectedTab) { tab in
-            if tab == .charging { selectedChargeLimit = Self.validLimit(settings.limit) }
+            if tab == .charging { syncSelectedChargeLimit() }
+        }
+        .onChange(of: settings.limit) { value in
+            syncSelectedChargeLimit(to: value)
+        }
+        .onChange(of: charge.currentLimit) { value in
+            syncSelectedChargeLimit(to: value.map { Double($0) })
+        }
+        .onChange(of: charge.availableLimits) { _ in
+            syncSelectedChargeLimit()
         }
         .foregroundStyle(Palette.text)
         .preferredColorScheme(.dark)
@@ -184,7 +194,7 @@ struct SettingsView: View {
             SettingsCard(title: "系统充电管理", subtitle: "查看此 Mac 实际提供的控制能力。", symbol: "bolt.shield.fill", color: Palette.blue) {
                 VStack(alignment: .leading, spacing: 13) {
                     infoRow("当前状态", value: coordinator.chargeStatus, color: Palette.green)
-                    infoRow("系统充电上限", value: systemLimitText, color: charge.isSupported ? Palette.green : Palette.secondary)
+                    infoRow("系统充电上限", value: systemLimitText, color: systemLimitColor)
                     Text("暂停充电、主动放电与电池校准由系统和硬件管理，当前版本不提供这些操作。")
                         .font(.system(size: 12))
                         .foregroundStyle(Palette.secondary)
@@ -193,7 +203,7 @@ struct SettingsView: View {
                         SmallButton(title: "打开系统电池设置", symbol: "arrow.up.right") { coordinator.openSystemBattery() }
                         Spacer()
                         SmallButton(title: "刷新状态", symbol: "arrow.clockwise", color: Palette.blue) {
-                            charge.refresh()
+                            coordinator.refreshChargeState()
                             monitor.refresh()
                         }
                     }
@@ -203,58 +213,90 @@ struct SettingsView: View {
     }
 
     private var chargeLimitCard: some View {
-        SettingsCard(title: "充电上限", subtitle: "选定目标后，将上限应用到系统。", symbol: "battery.100percent", color: Palette.green) {
+        SettingsCard(title: "充电上限", subtitle: "拖动选择上限，松手后自动应用到系统。", symbol: "battery.100percent", color: Palette.green) {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(alignment: .firstTextBaseline) {
-                    Text("目标上限").font(.system(size: 13, weight: .semibold)).foregroundStyle(Palette.secondary)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("目标上限")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(Palette.secondary)
+                        Text("\(Int(coordinator.temporaryFull ? 100 : selectedChargeLimit))%")
+                            .font(.system(size: 28, weight: .bold, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundStyle(coordinator.temporaryFull ? Palette.orange : Palette.green)
+                    }
                     Spacer()
-                    Text("\(Int(selectedChargeLimit))%")
-                        .font(.system(size: 28, weight: .bold, design: .rounded))
-                        .foregroundStyle(Palette.green)
+                    VStack(alignment: .trailing, spacing: 5) {
+                        Text("系统当前")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(Palette.secondary)
+                        Text(systemLimitText)
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(systemLimitColor)
+                            .multilineTextAlignment(.trailing)
+                    }
                 }
-                chargeSlider
-                HStack {
-                    Text("80%"); Spacer(); Text("85%"); Spacer(); Text("90%"); Spacer(); Text("95%"); Spacer(); Text("100%")
+                ChargeLimitControl(value: chargeLimitDraft, limits: charge.availableLimits,
+                                   isEnabled: canChangeChargeLimit) { limit in
+                    coordinator.applySelectedLimit(limit)
+                    if let actual = charge.currentLimit { syncSelectedChargeLimit(to: Double(actual)) }
                 }
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(Palette.secondary)
+                if let message = charge.message {
+                    Text(message)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(charge.operationConfirmed ? Palette.green : Palette.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 Text(chargeCapabilityCaption)
                     .font(.system(size: 12))
                     .foregroundStyle(Palette.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                HStack {
-                    applyLimitButton
-                    Spacer()
-                    if charge.isSupported && charge.isEnabled {
+                if charge.isSupported && charge.isEnabled {
+                    HStack {
+                        Spacer()
                         SmallButton(title: "恢复系统默认管理", symbol: "arrow.uturn.backward", color: Palette.blue) {
                             coordinator.restoreSystemManagement()
-                        }.disabled(coordinator.temporaryFull)
+                        }
+                        .disabled(coordinator.temporaryFull || !monitor.snapshot.hasBattery || !charge.hasKnownState)
                     }
                 }
             }
         }
     }
 
-    private var applyLimitButton: some View {
-        SmallButton(title: "应用系统充电上限", symbol: "checkmark.circle.fill") {
-            settings.limit = Self.validLimit(selectedChargeLimit)
-            coordinator.applyLimit()
-        }
-        .disabled(!charge.isSupported || !monitor.snapshot.hasBattery || coordinator.temporaryFull)
-        .opacity(charge.isSupported && monitor.snapshot.hasBattery && !coordinator.temporaryFull ? 1 : 0.45)
+    private var chargeLimitDraft: Binding<Double> {
+        Binding(get: { coordinator.temporaryFull ? 100 : selectedChargeLimit }, set: { value in
+            if !coordinator.temporaryFull { selectedChargeLimit = value }
+        })
+    }
+
+    private var canChangeChargeLimit: Bool {
+        monitor.snapshot.hasBattery && charge.isSupported && !charge.availableLimits.isEmpty && !coordinator.temporaryFull
+    }
+
+    private func syncSelectedChargeLimit(to value: Double? = nil) {
+        let limit = ChargeLimitOptions(charge.availableLimits).nearest(to: value ?? settings.limit)
+            ?? charge.currentLimit ?? 100
+        selectedChargeLimit = Double(limit)
     }
 
     private var chargeCapabilityCaption: String {
         if coordinator.temporaryFull { return "临时充满进行中。请在快捷养护中恢复原设置，再调整上限。" }
         if !monitor.snapshot.hasBattery { return "此 Mac 未检测到内置电池。" }
-        if charge.isSupported { return "支持 80%、85%、90%、95% 与 100%。调整滑块后点击应用，系统设置才会改变。" }
+        if charge.isSupported {
+            if charge.availableLimits.isEmpty { return "暂未读取到可用的充电上限，请刷新系统状态后再试。" }
+            return "松开滑块或点击加减会自动应用上限；系统当前值以回读结果为准。"
+        }
         return "此 Mac 当前未提供可用的系统充电上限接口，请前往系统电池设置管理充电。"
     }
 
     private var systemLimitText: String {
-        guard charge.isSupported else { return "当前系统不支持" }
-        if charge.isEnabled, let limit = charge.currentLimit { return "\(limit)% · 已开启" }
-        return "系统默认管理"
+        coordinator.systemChargeLimitText
+    }
+
+    private var systemLimitColor: Color {
+        if coordinator.temporaryFull { return Palette.orange }
+        return charge.hasKnownState && charge.isEnabled ? Palette.green : Palette.secondary
     }
 
     private var automationPage: some View {
@@ -362,19 +404,6 @@ struct SettingsView: View {
     }
 
     @ViewBuilder
-    private var chargeSlider: some View {
-        if staticRendering {
-            staticSlider(value: selectedChargeLimit, range: 80...100, color: Palette.green)
-        } else {
-            Slider(value: $selectedChargeLimit, in: 80...100, step: 5)
-                .tint(Palette.green)
-                .disabled(coordinator.temporaryFull)
-                .accessibilityLabel("目标充电上限")
-                .accessibilityValue("\(Int(selectedChargeLimit)) 百分比")
-        }
-    }
-
-    @ViewBuilder
     private var lowBatterySlider: some View {
         if staticRendering {
             staticSlider(value: settings.lowBatteryThreshold, range: 5...40, color: Palette.orange)
@@ -427,7 +456,7 @@ struct SettingsView: View {
             SettingsCard(title: "本机能力", subtitle: "各项功能以当前 Mac 和系统提供的数据为准。", symbol: "cpu.fill", color: Palette.purple) {
                 VStack(alignment: .leading, spacing: 11) {
                     infoRow("内置电池", value: monitor.snapshot.hasBattery ? "已检测到" : "未检测到", color: monitor.snapshot.hasBattery ? Palette.green : Palette.secondary)
-                    infoRow("系统充电上限", value: systemLimitText, color: charge.isSupported ? Palette.green : Palette.secondary)
+                    infoRow("系统充电上限", value: systemLimitText, color: systemLimitColor)
                     infoRow("通知权限", value: coordinator.notificationStatus, color: coordinator.notificationStatus == "已允许" ? Palette.green : Palette.secondary)
                     separator
                     Text("传感器未提供的项目显示为 —。App 活动按 CPU 使用率显示，该百分比不代表耗电占比。")
@@ -511,8 +540,4 @@ struct SettingsView: View {
         .overlay(alignment: .top) { Rectangle().fill(Palette.line).frame(height: 1) }
     }
 
-    private static func validLimit(_ value: Double) -> Double {
-        guard value.isFinite else { return 100 }
-        return min(100, max(80, (value / 5).rounded() * 5))
-    }
 }

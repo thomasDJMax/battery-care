@@ -212,6 +212,7 @@ struct BatteryCareApplication {
         withExtendedLifetime(delegate) { app.run() }
     }
     @MainActor private static func runReadOnlyChecks() {
+        runChargeLimitOptionsChecks()
         runDashboardPresentationChecks()
         runQuickCareChecks()
         runTemperatureReminderChecks()
@@ -227,8 +228,11 @@ struct BatteryCareApplication {
         precondition(snapshot.percentage == nil || (0...100).contains(snapshot.percentage!))
         precondition(snapshot.health == nil || (0...100).contains(snapshot.health!))
         precondition(monitor.history.count <= 90)
-        precondition(IAChargeSetLimit(75, nil, 0) == 0, "Invalid limits must be rejected before reaching system")
+        precondition(IAChargeSetLimit(0, nil, 0) == 0 && IAChargeSetLimit(101, nil, 0) == 0, "Invalid limits must be rejected before reaching system")
         let native = NativeChargeController()
+        precondition(native.availableLimits.allSatisfy { (1...100).contains($0) })
+        precondition(native.availableLimits == ChargeLimitOptions(native.availableLimits).values)
+        print("System available charge limits: \(native.availableLimits)")
         print("Battery present: \(snapshot.hasBattery); percentage: \(snapshot.percentage.map(String.init) ?? "unavailable"); cycles: \(snapshot.cycles.map(String.init) ?? "unavailable")")
         let temperature = snapshot.temperature.map { String(format: "%.2f°C", $0) } ?? "unavailable"
         print("System power: \(snapshot.systemPower.wattsText); app samples: \(monitor.apps.count); battery temperature: \(temperature)")

@@ -13,6 +13,7 @@ struct ProtectionState {
     let notificationCanDeliver: Bool
     let notificationDeliveryDescription: String
     let feedbackText: String?
+    var pendingTemporaryStatus: String? = nil
     var now = Date()
     func at(_ date: Date) -> ProtectionState { var state = self; state.now = date; return state }
 
@@ -40,6 +41,7 @@ struct ProtectionState {
         hasBattery && isChargeSupported && hasKnownChargeState && isChargeEnabled && !temporaryFull
     }
     var capStatusText: String {
+        if temporaryFull, let pendingTemporaryStatus { return pendingTemporaryStatus }
         if temporaryFull { return hasKnownChargeState ? "临时 100%" : "恢复点已保留" }
         if !hasBattery { return "无内置电池" }
         if !isChargeSupported { return "当前不支持" }
@@ -48,6 +50,7 @@ struct ProtectionState {
         return "系统管理"
     }
     var capDetailText: String {
+        if temporaryFull, pendingTemporaryStatus != nil { return "请求待确认，原设置已保留" }
         if temporaryFull { return hasKnownChargeState ? "充满后恢复原设置" : "状态待确认，请刷新后查看" }
         if !hasBattery { return "未检测到内置电池" }
         if !isChargeSupported { return "请在系统电池设置中管理充电" }

@@ -134,6 +134,9 @@ func runQuickCareChecks() {
     let ready = state(sample)
     precondition(ready.canToggleTemporary && ready.isPresetActive(80) && !ready.isPresetActive(90))
     let temporary = state(sample, limit: 100, temporary: true)
+    var awaiting = temporary
+    awaiting.pendingTemporaryStatus = "临时请求待确认"
+    precondition(awaiting.statusText == "临时请求待确认" && awaiting.temporarySubtitle.contains("原设置已保留"))
     precondition(temporary.canToggleTemporary && !temporary.canApplyPreset && !temporary.canRestoreSystem)
     precondition(!temporary.isPresetActive(80) && !temporary.isPresetActive(90))
     sample.isPluggedIn = false
@@ -159,6 +162,9 @@ func runQuickCareChecks() {
     coordinator.banner = nil
     coordinator.applyLimit()
     precondition(coordinator.temporaryFull && coordinator.banner != nil)
+    coordinator.banner = nil
+    coordinator.applySelectedLimit(100)
+    precondition(coordinator.temporaryFull && coordinator.banner != nil && coordinator.settings.limit == previous)
     coordinator.banner = nil
     coordinator.restoreSystemManagement()
     precondition(coordinator.temporaryFull && coordinator.banner != nil)

@@ -62,9 +62,11 @@ struct DashboardContent: View {
     let compact: Bool
     @State private var showBatteryDetails = false
     @State private var showControlInfo = false
+    @State private var chargeDraft: Double
     init(coordinator: AppCoordinator, compact: Bool) {
         self.coordinator = coordinator; self.compact = compact
         settings = coordinator.settings; monitor = coordinator.monitor; charge = coordinator.charge
+        _chargeDraft = State(initialValue: Double(ChargeLimitOptions(coordinator.charge.availableLimits).nearest(to: coordinator.settings.limit) ?? coordinator.charge.currentLimit ?? 100))
     }
     private var snapshot: BatterySnapshot { monitor.snapshot }
     var body: some View {
@@ -83,7 +85,10 @@ struct DashboardContent: View {
         }.frame(maxWidth: compact ? 382 : 700)
             .sheet(isPresented: $showBatteryDetails) { BatteryDetailsView(coordinator: coordinator) }
             .sheet(isPresented: $showControlInfo) { ControlInfoView(coordinator: coordinator) }
+            .onChange(of: settings.limit) { chargeDraft = $0 }
+            .onChange(of: charge.currentLimit) { if let limit = $0 { chargeDraft = Double(limit) } }
             .onReceive(NotificationCenter.default.publisher(for: .iadenteDashboardClosed)) { _ in
+                chargeDraft = Double(charge.currentLimit ?? Int(settings.limit))
                 if compact { showBatteryDetails = false; showControlInfo = false }
             }
     }
@@ -126,29 +131,31 @@ struct DashboardContent: View {
                     .font(.system(size: 24, weight: .heavy)).foregroundStyle(Palette.green).monospacedDigit()
                 Text("实时电量").font(.system(size: 11, weight: .semibold)).foregroundStyle(Palette.secondary)
                 Spacer()
-                Text("上限").font(.system(size: 11, weight: .semibold)).foregroundStyle(Palette.secondary)
-                Text("\(coordinator.temporaryFull ? 100 : Int(settings.limit))%").font(.system(size: 22, weight: .heavy)).foregroundStyle(Palette.green).monospacedDigit()
+                Text("选择上限").font(.system(size: 11, weight: .semibold)).foregroundStyle(Palette.secondary)
+                Text("\(coordinator.temporaryFull ? 100 : Int(chargeDraft))%").font(.system(size: 22, weight: .heavy)).foregroundStyle(Palette.green).monospacedDigit()
             }
-            ChargeSlider(value: Binding(get: { coordinator.temporaryFull ? 100 : settings.limit },
-                                        set: { if !coordinator.temporaryFull { settings.limit = $0 } }))
-                .disabled(coordinator.temporaryFull)
-            HStack {
-                Text("80%")
-                Spacer()
-                Text(coordinator.temporaryFull ? "临时充满期间上限为 100%" : "拖动白色标记调整上限")
-                Spacer()
-                Text("100%")
-            }.font(.system(size: 10, weight: .semibold)).foregroundStyle(Palette.secondary.opacity(0.65))
-            HStack(spacing: 6) {
-                Circle().fill(Palette.green).frame(width: 6, height: 6).shadow(color: Palette.green.opacity(0.8), radius: 5)
-                Text(coordinator.capCaption).font(.system(size: 10, weight: .semibold)).foregroundStyle(Palette.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Spacer(minLength: 0)
-                if !coordinator.temporaryFull && charge.isSupported && (Int(settings.limit) != charge.currentLimit || !charge.isEnabled) {
-                    Button("应用") { coordinator.applyLimit() }
-                        .font(.system(size: 11, weight: .bold)).foregroundStyle(Palette.green).buttonStyle(.plain).accessibilityLabel("应用系统充电上限")
+            ChargeLimitControl(value: Binding(get: { coordinator.temporaryFull ? 100 : chargeDraft },
+                                              set: { if !coordinator.temporaryFull { chargeDraft = $0 } }),
+                               limits: charge.availableLimits, isEnabled: coordinator.canAdjustChargeLimit) { limit in
+                coordinator.applySelectedLimit(limit)
+                if charge.hasKnownState, let actual = charge.currentLimit { chargeDraft = Double(actual) }
+            }
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 6) {
+                    Circle().fill(charge.hasKnownState ? Palette.green : Palette.orange).frame(width: 6, height: 6)
+                    Text("系统当前：\(coordinator.systemChargeLimitText)")
+                        .font(.system(size: 11, weight: .semibold)).foregroundStyle(Palette.text)
                 }
+                if coordinator.temporaryFull {
+                    Text(coordinator.capCaption)
+                } else if let message = charge.message {
+                    Text(message)
+                }
+                if !snapshot.isPluggedIn { Text("接通电源后按系统上限管理充电") }
             }
+            .font(.system(size: 10)).foregroundStyle(Palette.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }.padding(14)
             .background(LinearGradient(colors: [Color(red: 0.10, green: 0.13, blue: 0.16), Color(red: 0.075, green: 0.085, blue: 0.09)], startPoint: .leading, endPoint: .trailing), in: RoundedRectangle(cornerRadius: 16))
             .overlay(RoundedRectangle(cornerRadius: 16).stroke(LinearGradient(colors: [.white.opacity(0.13), Palette.green.opacity(0.22)], startPoint: .leading, endPoint: .trailing), lineWidth: 1))
@@ -277,10 +284,15 @@ struct AppUsageRow: View {
 
 struct ChargeSlider: View {
     @Binding var value: Double
+    let limits: [Int]
+    let onCommit: (Int) -> Void
+    private var options: ChargeLimitOptions { ChargeLimitOptions(limits) }
     var body: some View {
         GeometryReader { geometry in
             let width = geometry.size.width
-            let offset = CGFloat((min(100, max(80, value)) - 80) / 20) * (width - 16)
+            let range = options.range
+            let selected = min(range.upperBound, max(range.lowerBound, value))
+            let offset = CGFloat((selected - range.lowerBound) / (range.upperBound - range.lowerBound)) * max(0, width - 16)
             ZStack(alignment: .leading) {
                 Capsule().fill(Palette.gradient).frame(height: 10).shadow(color: Palette.green.opacity(0.25), radius: 8)
                 HStack(spacing: 0) {
@@ -291,12 +303,21 @@ struct ChargeSlider: View {
                 Circle().fill(Color.white).frame(width: 13, height: 13).overlay(Circle().stroke(Palette.green.opacity(0.65), lineWidth: 2.5)).offset(x: offset + 1.5)
             }.frame(height: 20).contentShape(Rectangle())
                 .gesture(DragGesture(minimumDistance: 0).onChanged { gesture in
-                    let percent = 80 + min(1, max(0, (gesture.location.x - 8) / max(1, width - 16))) * 20
-                    value = (percent / 5).rounded() * 5
+                    let percent = range.lowerBound + min(1, max(0, (gesture.location.x - 8) / max(1, width - 16))) * (range.upperBound - range.lowerBound)
+                    if let limit = options.nearest(to: percent) { value = Double(limit) }
+                }.onEnded { gesture in
+                    let percent = range.lowerBound + min(1, max(0, (gesture.location.x - 8) / max(1, width - 16))) * (range.upperBound - range.lowerBound)
+                    if let limit = options.nearest(to: percent) { value = Double(limit); onCommit(limit) }
                 })
                 .accessibilityElement().accessibilityLabel("充电上限").accessibilityValue("\(Int(value))%")
                 .accessibilityAdjustableAction { direction in
-                    switch direction { case .increment: value = min(100, value + 5); case .decrement: value = max(80, value - 5); default: break }
+                    let next: Int?
+                    switch direction {
+                    case .increment: next = options.adjacent(to: value, increasing: true)
+                    case .decrement: next = options.adjacent(to: value, increasing: false)
+                    default: next = nil
+                    }
+                    if let next { value = Double(next); onCommit(next) }
                 }
         }.frame(height: 20)
     }
@@ -338,7 +359,7 @@ struct ControlInfoView: View {
         VStack(alignment: .leading, spacing: 16) {
             IconTile(symbol: "shield.lefthalf.filled", color: Palette.green, size: 40)
             Text("这台 Mac 的充电控制").font(.system(size: 20, weight: .bold))
-            Text(coordinator.charge.isSupported ? "系统充电上限支持 80%、85%、90%、95% 和 100%。选择上限并点击“应用”，即可同步到 macOS。系统优化充电可能延后充满。" : "这台 Mac 未提供兼容的程序内充电上限接口，请在系统电池设置中管理充电。")
+            Text(coordinator.charge.isSupported ? "系统可用上限：\(ChargeLimitOptions(coordinator.charge.availableLimits).caption)。拖动滑块后松手，或点击加减按钮，即可应用到 macOS。系统优化充电可能延后充满。" : "这台 Mac 未提供兼容的程序内充电上限接口，请在系统电池设置中管理充电。")
                 .font(.system(size: 13)).fixedSize(horizontal: false, vertical: true)
             Text("当前 macOS 限制第三方直接暂停充电、强制使用电池和睡眠暂停。高温保护与容量校准由系统维护。")
                 .font(.system(size: 12)).foregroundStyle(Palette.secondary).fixedSize(horizontal: false, vertical: true)

@@ -7,6 +7,7 @@ extern "C" {
 
 /* Read operations never change charging settings. */
 int IAChargeSupported(void);
+int IAChargeCopyAvailableLimits(int *limits, int capacity); /* count; 0 unavailable */
 int IAChargeCurrentLimit(void); /* -1 when unavailable */
 int IAChargeEnabled(void);      /* 0 disabled, 1 enabled, -1 unavailable */
 

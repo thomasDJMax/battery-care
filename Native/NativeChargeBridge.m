@@ -21,7 +21,9 @@
 #define IA_RETAIN_CLIENT(value) [(value) retain]
 #endif
 
-typedef id (*IAInitCall)(id, SEL, id);
+@protocol IAChargeClientInitialization
+- (instancetype)initWithClientName:(NSString *)name;
+@end
 typedef BOOL (*IABoolCall)(id, SEL);
 typedef id (*IAArrayCall)(id, SEL, NSError *__autoreleasing *);
 typedef unsigned char (*IALimitCall)(id, SEL, NSError *__autoreleasing *);
@@ -61,8 +63,7 @@ static void IAInitialize(void) {
                 iaUnavailableReason = @"当前系统的充电接口版本不兼容，请在系统设置中调整充电上限。";
                 return;
             }
-            id allocated = [cls alloc];
-            id initialized = ((IAInitCall)objc_msgSend)(allocated, sel_registerName("initWithClientName:"), @"iAdente");
+            id initialized = [(id<IAChargeClientInitialization>)[cls alloc] initWithClientName:@"iAdente"];
             if (initialized == nil) {
                 iaUnavailableReason = @"无法连接系统充电服务。";
                 return;
@@ -76,7 +77,7 @@ static void IAInitialize(void) {
 }
 
 static BOOL IAKnownLimit(int value) {
-    return value == 80 || value == 85 || value == 90 || value == 95 || value == 100;
+    return value >= 1 && value <= 100;
 }
 
 /* All callers hold iaLock and catch any Objective-C exception. */
@@ -128,6 +129,23 @@ int IAChargeSupported(void) {
     }
 }
 
+int IAChargeCopyAvailableLimits(int *limits, int capacity) {
+    @autoreleasepool {
+        IAInitialize();
+        [iaLock lock];
+        int count = 0;
+        @try {
+            NSArray<NSNumber *> *available = IAAvailableLimits(NULL);
+            count = (int)available.count;
+            if (limits != NULL && capacity > 0) {
+                for (int i = 0; i < count && i < capacity; i++) limits[i] = available[i].intValue;
+            }
+        } @catch (NSException *exception) { count = 0; }
+        @finally { [iaLock unlock]; }
+        return count;
+    }
+}
+
 int IAChargeCurrentLimit(void) {
     @autoreleasepool {
         IAInitialize();
@@ -166,7 +184,7 @@ int IAChargeEnabled(void) {
 int IAChargeSetLimit(int limit, char *error, int capacity) {
     IACopyError(error, capacity, @"");
     if (!IAKnownLimit(limit)) {
-        IACopyError(error, capacity, @"系统充电上限仅支持 80%、85%、90%、95% 和 100%。");
+        IACopyError(error, capacity, @"充电上限必须是 1% 至 100% 的整数，并由系统支持。" );
         return 0;
     }
     @autoreleasepool {

@@ -10,6 +10,7 @@ struct QuickCareState {
     let currentLimit: Int?
     let temporaryFull: Bool
     let restoreDescription: String
+    var pendingTemporaryStatus: String? = nil
 
     var hasBattery: Bool { snapshot.hasBattery }
     var canApplyPreset: Bool { hasBattery && isSupported && !temporaryFull }
@@ -19,6 +20,7 @@ struct QuickCareState {
         !temporaryFull && hasKnownState && isEnabled && currentLimit == limit
     }
     var statusText: String {
+        if temporaryFull, let pendingTemporaryStatus { return pendingTemporaryStatus }
         if temporaryFull { return "临时 100%" }
         if !hasBattery { return "无内置电池" }
         if !isSupported { return "仅监测" }
@@ -41,6 +43,7 @@ struct QuickCareState {
         return "开始"
     }
     var temporarySubtitle: String {
+        if temporaryFull, pendingTemporaryStatus != nil { return "请求待确认，原设置已保留" }
         if temporaryFull {
             return hasKnownState ? "充满后自动恢复\(restoreDescription)" : "状态待确认，原设置已保留"
         }
