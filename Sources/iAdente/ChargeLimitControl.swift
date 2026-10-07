@@ -39,12 +39,20 @@ struct ChargeLimitControl: View {
         } label: {
             Image(systemName: increasing ? "plus" : "minus")
                 .font(.system(size: 12, weight: .bold))
-                .foregroundStyle(isEnabled && next != nil ? Palette.green : Palette.secondary.opacity(0.4))
+                .foregroundStyle(Palette.green)
                 .frame(width: 29, height: 29)
-                .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 7))
+                .background(Color(red: 0.15, green: 0.18, blue: 0.19), in: RoundedRectangle(cornerRadius: 7))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ChargeAdjustmentButtonStyle())
+        .opacity(isEnabled ? 1 : 0.45)
         .disabled(!isEnabled || next == nil || staticRendering)
+        .help(next == nil ? (increasing ? "已达到系统最高上限" : "已达到系统最低上限") : "调整后立即应用")
         .accessibilityLabel(increasing ? "提高充电上限并应用" : "降低充电上限并应用")
+    }
+}
+
+private struct ChargeAdjustmentButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label.opacity(configuration.isPressed ? 0.75 : 1)
     }
 }
