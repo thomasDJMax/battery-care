@@ -12,6 +12,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var dashboardPanel: DashboardPanelController!
     private var settingsWindow: NSWindow?
     private var subscriptions = Set<AnyCancellable>()
+    private var lastStatusPresentation: StatusPresentation?
+
+    private struct StatusPresentation: Equatable {
+        let text: String
+        let percentage: Int?
+        let charging: Bool
+        let powerConnected: Bool
+        let useColors: Bool
+        let status: String
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         coordinator = AppCoordinator(preview: CommandLine.arguments.contains("--preview"))
@@ -28,7 +38,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         dashboardPanel = DashboardPanelController(coordinator: coordinator)
         coordinator.monitor.$snapshot.sink { [weak self] _ in DispatchQueue.main.async { self?.updateStatus() } }.store(in: &subscriptions)
         coordinator.settings.objectWillChange.sink { [weak self] _ in DispatchQueue.main.async { self?.updateStatus() } }.store(in: &subscriptions)
+        coordinator.$selectedTab.removeDuplicates().sink { [weak self] tab in
+            self?.updateSettingsSampling(tab: tab)
+        }.store(in: &subscriptions)
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(didWake), name: NSWorkspace.didWakeNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(willSleep), name: NSWorkspace.willSleepNotification, object: nil)
         updateStatus()
         let loginLaunch = NSAppleEventManager.shared().currentAppleEvent?.paramDescriptor(forKeyword: AEKeyword(keyAELaunchedAsLogInItem))?.booleanValue ?? false
         if !loginLaunch && !CommandLine.arguments.contains("--background") {
@@ -36,7 +50,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    @objc private func didWake() { coordinator.monitor.refresh(); coordinator.charge.refresh() }
+    @objc private func willSleep() { coordinator.monitor.setSuspended(true); dashboardPanel.close() }
+    @objc private func didWake() { coordinator.monitor.setSuspended(false); coordinator.refreshChargeState() }
     func applicationDidBecomeActive(_ notification: Notification) { coordinator?.updateNotificationStatus() }
 
     @objc private func togglePopover(_ sender: Any?) {
@@ -89,13 +104,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard let button = statusItem?.button, coordinator != nil else { return }
         let snapshot = coordinator.monitor.snapshot
         let percent = snapshot.percentage.map { "\($0)%" } ?? "—%"
-        let power = snapshot.systemPower.map { String(format: "%.1fW", $0) } ?? "—W"
+        let power = snapshot.systemPower.map { (snapshot.systemPowerSource == .batteryDischargeEstimate ? "≈" : "") + String(format: "%.1fW", $0) } ?? "—W"
         let text: String
         switch coordinator.settings.readout {
         case .battery: text = percent
         case .power: text = power
         case .both: text = "\(percent)  ·  \(power)"
         }
+        let presentation = StatusPresentation(text: text, percentage: snapshot.percentage,
+                                              charging: snapshot.isCharging,
+                                              powerConnected: snapshot.isPluggedIn || snapshot.isCharging,
+                                              useColors: coordinator.settings.useColors, status: snapshot.statusText)
+        guard presentation != lastStatusPresentation else { return }
+        lastStatusPresentation = presentation
         // Status bar ink depends on the desktop behind the bar, not the app's
         // window appearance. Native titles and template icons let macOS choose
         // contrasting ink; forcing labelColor/contentTintColor made dark bars
@@ -108,23 +129,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         button.toolTip = "\(AppIdentity.displayName) · \(snapshot.statusText) · \(text)"
         if snapshot.isCharging && coordinator.settings.useColors {
             button.title = ""
-            button.image = StatusReadout.chargingImage(text: text)
+            button.image = StatusReadout.chargingImage(text: text, percentage: snapshot.percentage)
             button.imagePosition = .imageOnly
             button.imageScaling = .scaleNone
             button.setAccessibilityLabel("\(AppIdentity.displayName)，正在充电，\(text)")
             return
         }
-        let powerConnected = snapshot.isPluggedIn || snapshot.isCharging
-        let symbol = powerConnected ? "battery.100percent.bolt" : "battery.100percent"
-        var image = NSImage(systemSymbolName: symbol, accessibilityDescription: "电池")?
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 16, weight: .medium))
-        if coordinator.settings.useColors {
-            let color = StatusReadout.batteryGreen
-            if powerConnected { image = StatusReadout.powerConnectedBattery(color: color) }
-            else { image = image?.withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [color])) }
-            image?.isTemplate = false
-        } else { image?.isTemplate = true }
-        button.image = image
+        button.image = StatusReadout.batteryImage(percentage: snapshot.percentage,
+                                                  powerConnected: presentation.powerConnected,
+                                                  useColors: presentation.useColors)
         button.imagePosition = .imageLeading
         button.imageScaling = .scaleNone
         button.setAccessibilityLabel("\(AppIdentity.displayName)，\(snapshot.statusText)，\(text)")
@@ -133,13 +146,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func showSettings() {
         dashboardPanel?.close()
         if settingsWindow == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 860, height: 600), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+            // Extend the material beneath the transparent native titlebar.
+            // SwiftUI's safe area still reserves room for the window controls.
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1080, height: 740), styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
             window.title = "\(AppIdentity.displayName) · 电池养护控制台"
             window.titleVisibility = .hidden
+            window.titlebarAppearsTransparent = true
             window.appearance = NSAppearance(named: .darkAqua)
-            window.backgroundColor = NSColor(calibratedWhite: 0.32, alpha: 1)
+            window.isOpaque = false
+            window.backgroundColor = .clear
             window.isReleasedWhenClosed = false
-            window.minSize = NSSize(width: 780, height: 600)
+            window.minSize = NSSize(width: 960, height: 680)
             window.delegate = self
             window.contentView = NSHostingView(rootView: SettingsView(coordinator: coordinator))
             window.center()
@@ -147,10 +164,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             settingsWindow = window
         }
         NSApp.setActivationPolicy(.regular)
+        if settingsWindow?.isMiniaturized == true { settingsWindow?.deminiaturize(nil) }
         settingsWindow?.makeKeyAndOrderFront(nil)
+        updateSettingsSampling()
         NSApp.activate(ignoringOtherApps: true)
     }
-    func windowWillClose(_ notification: Notification) { NSApp.setActivationPolicy(.accessory) }
+    func windowWillClose(_ notification: Notification) {
+        coordinator.monitor.setAppSamplingVisible(false, source: .settingsDashboard)
+        NSApp.setActivationPolicy(.accessory)
+    }
+    func windowDidMiniaturize(_ notification: Notification) { coordinator.monitor.setAppSamplingVisible(false, source: .settingsDashboard) }
+    func windowDidDeminiaturize(_ notification: Notification) { updateSettingsSampling() }
+    func windowDidChangeOcclusionState(_ notification: Notification) { updateSettingsSampling() }
+    private func updateSettingsSampling(tab: SettingsTab? = nil) {
+        let visible = settingsWindow?.isVisible == true && settingsWindow?.isMiniaturized != true && settingsWindow?.occlusionState.contains(.visible) == true
+        coordinator.monitor.setAppSamplingVisible(visible && (tab ?? coordinator.selectedTab) == .dashboard, source: .settingsDashboard)
+    }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { showSettings(); return true }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationWillTerminate(_ notification: Notification) {
@@ -200,6 +229,11 @@ struct BatteryCareApplication {
             catch { print("Rendering failed: \(error)"); exit(1) }
             return
         }
+        if let index = CommandLine.arguments.firstIndex(of: "--render-status-qa"), index + 1 < CommandLine.arguments.count {
+            do { try renderStatusReadoutViews(to: CommandLine.arguments[index + 1]) }
+            catch { print("Status rendering failed: \(error)"); exit(1) }
+            return
+        }
         if CommandLine.arguments.contains("--self-test") {
             runReadOnlyChecks()
             return
@@ -213,6 +247,20 @@ struct BatteryCareApplication {
         runDashboardPresentationChecks()
         runQuickCareChecks()
         runTemperatureReminderChecks()
+        runStatusReadoutChecks()
+        runChargeStateChecks()
+        BatterySamplingChecks.run()
+        print("Sampling policy checks passed: visible dashboards, 15-second cadence, sleep generations, invalid values and power sources.")
+        var lifecycleChecksFinished = false
+        Task { @MainActor in
+            await BatterySamplingChecks.runMonitorLifecycleChecks()
+            lifecycleChecksFinished = true
+        }
+        let lifecycleDeadline = Date().addingTimeInterval(5)
+        while !lifecycleChecksFinished && Date() < lifecycleDeadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+        }
+        precondition(lifecycleChecksFinished, "Monitor lifecycle checks did not finish")
         precondition(BatteryTemperature.celsius(31.5) == 31.5)
         precondition(abs(BatteryTemperature.fromCentiCelsius(3139)! - 31.39) < 0.0001)
         precondition(BatteryTemperature.fromCentiCelsius(0) == nil)

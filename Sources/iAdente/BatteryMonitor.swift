@@ -18,6 +18,7 @@ struct BatterySnapshot: Sendable {
     var adapterAmperage: Double? = nil
     var adapterPower: Double? = nil
     var systemPower: Double? = nil
+    var systemPowerSource: PowerMeasurementSource? = nil
     var batteryPower: Double? = nil
     var timeRemainingMinutes: Int? = nil
     /// Available capacity fields are expressed in mAh, never percentage units.
@@ -42,7 +43,7 @@ struct BatterySnapshot: Sendable {
         hasBattery: true, percentage: 100, isPluggedIn: true, isCharging: false,
         temperature: nil, health: 100, cycles: 49,
         adapterVoltage: 27.62, adapterAmperage: 1.62,
-        adapterPower: 44.78, systemPower: 44.78, batteryPower: 0,
+        adapterPower: 44.78, systemPower: 44.78, systemPowerSource: .systemLoad, batteryPower: 0,
         currentCapacity: 8422, designCapacity: 8579, maxCapacity: 8552,
         batteryVoltage: 13.02, batteryAmperage: 0
     )
@@ -67,14 +68,24 @@ final class BatteryMonitor: ObservableObject {
     @Published var snapshot = BatterySnapshot()
     @Published var history: [PowerSample] = []
     @Published var apps: [AppUsage] = []
+    @Published private(set) var isRefreshing = false
+    @Published private(set) var appsUpdatedAt: Date?
+    @Published private(set) var appActivityMessage: String? = "打开仪表盘后读取应用活动"
 
     private var timer: Timer?
-    private var isRefreshing = false
+    private var appTimer: Timer?
+    private var batteryTask: Task<Void, Never>?
+    private var appTask: Task<Void, Never>?
+    private var appRequest: AppProcessSampleRequest?
+    private var sampling = BatterySamplingPolicy()
+    private var historySource: PowerMeasurementSource?
     private let isPreview: Bool
+    private let samplingDependencies: BatterySamplingDependencies?
     private var refreshInterval: TimeInterval = 4
 
-    init(preview: Bool = false) {
+    init(preview: Bool = false, samplingDependencies: BatterySamplingDependencies? = nil) {
         isPreview = preview
+        self.samplingDependencies = samplingDependencies
         if preview {
             snapshot = .preview
             let values: [Double] = [27, 28, 31, 29, 33, 37, 35, 34, 40, 38, 42, 45, 41, 39, 43, 44.78]
@@ -87,84 +98,159 @@ final class BatteryMonitor: ObservableObject {
                 AppUsage(id: -2, name: "Tiger办公", cpuPercent: 25.0, icon: NSImage(systemSymbolName: "doc.fill", accessibilityDescription: nil)),
                 AppUsage(id: -3, name: "Muse", cpuPercent: 1.4, icon: NSImage(systemSymbolName: "waveform", accessibilityDescription: nil))
             ]
+            appsUpdatedAt = now
+            appActivityMessage = nil
+            historySource = .systemLoad
         } else {
             refresh()
             installTimer()
         }
     }
 
-    deinit { timer?.invalidate() }
+    deinit {
+        timer?.invalidate()
+        appTimer?.invalidate()
+        batteryTask?.cancel()
+        appRequest?.cancel()
+        appTask?.cancel()
+    }
 
     func setRefreshInterval(_ seconds: TimeInterval) {
         guard seconds.isFinite else { return }
-        refreshInterval = min(60, max(2, seconds))
-        if !isPreview { installTimer() }
+        let interval = min(60, max(2, seconds))
+        guard interval != refreshInterval else { return }
+        refreshInterval = interval
+        if !isPreview && !sampling.isSuspended { installTimer() }
     }
 
     func refresh() {
-        guard !isPreview, !isRefreshing else { return }
+        guard !isPreview, !sampling.isSuspended, !isRefreshing else { return }
         isRefreshing = true
+        let generation = sampling.batteryGeneration
+        let dependencies = samplingDependencies
 
-        // AppKit objects remain on the main actor; only numeric process samples
-        // and battery values return from the background worker.
-        Task { [weak self] in
-            let result = await Task.detached(priority: .utility) {
-                (Self.readBattery(), Self.readProcesses())
-            }.value
-            guard let self else { return }
-            self.snapshot = result.0
-            if let watts = result.0.systemPower ?? result.0.batteryPower.map({ abs($0) }), watts.isFinite {
-                self.history.append(PowerSample(timestamp: result.0.updatedAt, watts: watts))
+        // Process sampling has its own task and cadence; it cannot delay a
+        // battery read, a wake refresh, or the charging status in the menu bar.
+        batteryTask = Task { [weak self] in
+            let result: BatterySnapshot
+            if let dependencies { result = await dependencies.battery() }
+            else { result = await Task.detached(priority: .utility) { Self.readBattery() }.value }
+            guard !Task.isCancelled, let self,
+                  self.sampling.acceptsBatteryResult(generation: generation) else { return }
+            self.snapshot = result
+            if let reading = BatterySamplingPolicy.historyReading(result) {
+                // A discharge estimate and measured SystemLoad are different
+                // metrics. Do not draw a continuous history across that switch.
+                if self.historySource != reading.source { self.history.removeAll(keepingCapacity: true) }
+                self.historySource = reading.source
+                self.history.append(PowerSample(timestamp: result.updatedAt, watts: reading.watts))
                 if self.history.count > 90 { self.history.removeFirst(self.history.count - 90) }
             }
-
-            let running = Dictionary(NSWorkspace.shared.runningApplications.map { ($0.processIdentifier, $0) }, uniquingKeysWith: { first, _ in first })
-            self.apps = result.1.compactMap { sample -> AppUsage? in
-                guard let application = running[sample.pid],
-                      application.activationPolicy == .regular,
-                      let name = application.localizedName else { return nil }
-                return AppUsage(id: sample.pid, name: name, cpuPercent: sample.cpuPercent, icon: application.icon)
-            }.sorted {
-                $0.cpuPercent == $1.cpuPercent ? $0.name.localizedCompare($1.name) == .orderedAscending : $0.cpuPercent > $1.cpuPercent
-            }.prefix(3).map { $0 }
             self.isRefreshing = false
+            self.batteryTask = nil
         }
     }
 
+    func setAppSamplingVisible(_ visible: Bool, source: AppSamplingSource) {
+        sampling.setVisible(visible, source: source)
+        updateAppSampling()
+    }
+
+    func setSuspended(_ suspended: Bool) {
+        guard sampling.setSuspended(suspended) else { return }
+        if suspended {
+            timer?.invalidate()
+            timer = nil
+            batteryTask?.cancel()
+            batteryTask = nil
+            isRefreshing = false
+        } else if !isPreview {
+            installTimer()
+            refresh()
+        }
+        updateAppSampling()
+    }
+
+    private func updateAppSampling() {
+        guard !isPreview else { return }
+        if sampling.shouldRunAppTimer {
+            if appTimer == nil && automaticallySchedulesTimers {
+                appTimer = Timer.scheduledTimer(withTimeInterval: BatterySamplingPolicy.appInterval, repeats: true) { [weak self] _ in
+                    Task { @MainActor [weak self] in self?.refreshAppsIfDue() }
+                }
+                appTimer?.tolerance = 2
+                if let appTimer { RunLoop.main.add(appTimer, forMode: .common) }
+            }
+            refreshAppsIfDue()
+        } else {
+            appTimer?.invalidate()
+            appTimer = nil
+            appRequest?.cancel()
+            appRequest = nil
+            appTask?.cancel()
+            appTask = nil
+            if apps.isEmpty { appActivityMessage = "打开仪表盘后读取应用活动" }
+        }
+    }
+
+    private func refreshAppsIfDue() {
+        let now = currentDate
+        guard appTask == nil, sampling.shouldSampleApps(at: now) else { return }
+        sampling.recordAppSampleStarted(at: now)
+        let generation = sampling.appGeneration
+        let dependencies = samplingDependencies
+        let request = dependencies == nil ? AppProcessSampleRequest() : nil
+        appRequest = request
+        if apps.isEmpty { appActivityMessage = "正在读取应用活动…" }
+        appTask = Task { [weak self] in
+            let result: ProcessSamplingResult
+            if let dependencies { result = await dependencies.appActivity() }
+            else if let request { result = await Task.detached(priority: .utility) { request.run() }.value }
+            else { return }
+            guard !Task.isCancelled, let self,
+                  self.sampling.acceptsAppResult(generation: generation) else { return }
+            self.appRequest = nil
+            self.appTask = nil
+            switch result {
+            case .success(let samples):
+                self.publishApps(samples)
+                self.appsUpdatedAt = self.currentDate
+                self.appActivityMessage = self.apps.isEmpty ? "暂未找到可显示的应用" : nil
+            case .failure(let message):
+                self.apps = []
+                self.appActivityMessage = message
+            case .cancelled:
+                self.appActivityMessage = self.apps.isEmpty ? "应用活动采样已暂停" : nil
+            }
+        }
+    }
+
+    private func publishApps(_ samples: [ProcessSample]) {
+        guard !samples.isEmpty else { apps = []; return }
+        let running = Dictionary(NSWorkspace.shared.runningApplications.map { ($0.processIdentifier, $0) }, uniquingKeysWith: { first, _ in first })
+        // Fetch icons only for the three rows that will actually be displayed.
+        let ranked = samples.compactMap { sample -> (ProcessSample, NSRunningApplication, String)? in
+            guard let application = running[sample.pid], application.activationPolicy == .regular,
+                  let name = application.localizedName else { return nil }
+            return (sample, application, name)
+        }.sorted {
+            $0.0.cpuPercent == $1.0.cpuPercent ? $0.2.localizedCompare($1.2) == .orderedAscending : $0.0.cpuPercent > $1.0.cpuPercent
+        }.prefix(3)
+        apps = ranked.map { AppUsage(id: $0.0.pid, name: $0.2, cpuPercent: $0.0.cpuPercent, icon: $0.1.icon) }
+    }
+
     private func installTimer() {
+        guard automaticallySchedulesTimers else { return }
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: refreshInterval, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in self?.refresh() }
         }
+        timer?.tolerance = min(5, refreshInterval * 0.2)
         if let timer { RunLoop.main.add(timer, forMode: .common) }
     }
 
-    private struct ProcessSample: Sendable {
-        let pid: Int32
-        let cpuPercent: Double
-    }
-
-    nonisolated private static func readProcesses() -> [ProcessSample] {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/ps")
-        process.arguments = ["-axo", "pid=,pcpu=,comm="]
-        let output = Pipe()
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-            let data = output.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0, let text = String(data: data, encoding: .utf8) else { return [] }
-            return text.split(separator: "\n").compactMap { line in
-                let fields = line.split(maxSplits: 2, omittingEmptySubsequences: true, whereSeparator: { $0 == " " || $0 == "\t" })
-                guard fields.count >= 2, let pid = Int32(fields[0]), let cpu = Double(fields[1]), cpu.isFinite else { return nil }
-                return ProcessSample(pid: pid, cpuPercent: max(0, cpu))
-            }
-        } catch {
-            return []
-        }
-    }
+    private var automaticallySchedulesTimers: Bool { samplingDependencies?.automaticallySchedulesTimers ?? true }
+    private var currentDate: Date { samplingDependencies?.now() ?? Date() }
 
     nonisolated private static func readBattery() -> BatterySnapshot {
         var sample = BatterySnapshot(updatedAt: Date())
@@ -177,7 +263,7 @@ final class BatteryMonitor: ObservableObject {
                       description[kIOPSTypeKey] as? String == kIOPSInternalBatteryType else { continue }
                 sample.hasBattery = true
                 if let current = number(description, kIOPSCurrentCapacityKey), let maximum = number(description, kIOPSMaxCapacityKey), maximum > 0 {
-                    sample.percentage = min(100, max(0, Int((current / maximum * 100).rounded())))
+                    sample.percentage = BatteryMetricParser.percentage(current: current, maximum: maximum)
                 }
                 sample.isPluggedIn = description[kIOPSPowerSourceStateKey] as? String == kIOPSACPowerValue
                 sample.isCharging = boolean(description, kIOPSIsChargingKey) ?? false
@@ -204,10 +290,10 @@ final class BatteryMonitor: ObservableObject {
         sample.hasBattery = boolean(registry, "BatteryInstalled") ?? true
         sample.isPluggedIn = boolean(registry, "ExternalConnected") ?? sample.isPluggedIn
         sample.isCharging = boolean(registry, "IsCharging") ?? sample.isCharging
-        sample.cycles = number(registry, "CycleCount").map { Int($0) }
+        sample.cycles = BatteryMetricParser.firstNonnegativeInteger(number(registry, "CycleCount"))
         if sample.percentage == nil,
            let current = number(registry, "CurrentCapacity"), let maximum = number(registry, "MaxCapacity"), maximum > 0 {
-            sample.percentage = min(100, max(0, Int((current / maximum * 100).rounded())))
+            sample.percentage = BatteryMetricParser.percentage(current: current, maximum: maximum)
         }
 
         sample.batteryVoltage = positive(number(registry, "Voltage")).map { $0 / 1_000 }
@@ -218,12 +304,13 @@ final class BatteryMonitor: ObservableObject {
         }
 
         let batteryData = registry["BatteryData"] as? [String: Any] ?? [:]
-        sample.designCapacity = positive(number(registry, "DesignCapacity") ?? number(batteryData, "DesignCapacity")).map { Int($0) }
-        sample.maxCapacity = positive(number(registry, "AppleRawMaxCapacity") ?? number(batteryData, "FullChargeCapacity") ?? number(batteryData, "NominalChargeCapacity")).map { Int($0) }
-        sample.currentCapacity = nonnegative(number(registry, "AppleRawCurrentCapacity") ?? number(batteryData, "RemainingCapacity")).map { Int($0) }
-        if let maximum = sample.maxCapacity, let design = sample.designCapacity, design > 0 {
-            sample.health = min(100, max(0, Int((Double(maximum) / Double(design) * 100).rounded())))
-        }
+        // Validate each mAh candidate before falling back. A zero placeholder
+        // in the first key must not hide a valid nested capacity. The public
+        // normalized CurrentCapacity/MaxCapacity fields are not mAh fallbacks.
+        sample.designCapacity = BatteryMetricParser.firstPositiveInteger(number(registry, "DesignCapacity"), number(batteryData, "DesignCapacity"))
+        sample.maxCapacity = BatteryMetricParser.firstPositiveInteger(number(registry, "AppleRawMaxCapacity"), number(batteryData, "FullChargeCapacity"), number(batteryData, "NominalChargeCapacity"))
+        sample.currentCapacity = BatteryMetricParser.firstNonnegativeInteger(number(registry, "AppleRawCurrentCapacity"), number(batteryData, "RemainingCapacity"))
+        sample.health = BatteryMetricParser.health(maximum: sample.maxCapacity, design: sample.designCapacity)
 
         let telemetry = registry["PowerTelemetryData"] as? [String: Any] ?? [:]
         if sample.isPluggedIn {
@@ -237,12 +324,14 @@ final class BatteryMonitor: ObservableObject {
             }
         }
         sample.systemPower = nonnegative(number(telemetry, "SystemLoad")).map { $0 / 1_000 }
+        if sample.systemPower != nil { sample.systemPowerSource = .systemLoad }
         sample.batteryPower = signedNumber(telemetry, "BatteryPower").map { $0 / 1_000 }
         if sample.batteryPower == nil, let voltage = sample.batteryVoltage, let amperage = sample.batteryAmperage {
             sample.batteryPower = voltage * amperage
         }
-        if sample.systemPower == nil, !sample.isPluggedIn {
+        if sample.systemPower == nil, !sample.isPluggedIn, !sample.isCharging {
             sample.systemPower = sample.batteryPower.map { abs($0) }
+            if sample.systemPower != nil { sample.systemPowerSource = .batteryDischargeEstimate }
         }
         if sample.timeRemainingMinutes == nil {
             sample.timeRemainingMinutes = validMinutes(number(registry, sample.isCharging ? "AvgTimeToFull" : "AvgTimeToEmpty"))

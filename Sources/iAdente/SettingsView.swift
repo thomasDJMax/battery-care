@@ -9,6 +9,7 @@ struct SettingsView: View {
     @ObservedObject var charge: NativeChargeController
     @State private var selectedChargeLimit: Double
     @Environment(\.staticRendering) private var staticRendering
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     init(coordinator: AppCoordinator) {
         self.coordinator = coordinator
@@ -21,118 +22,134 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        ZStack {
-            AppBackground(settings: settings)
+        HStack(spacing: 0) {
+            sidebar.frame(width: 184)
+            Rectangle().fill(Palette.line).frame(width: 1)
             VStack(spacing: 0) {
                 header
                 contentArea
-                if let message = coordinator.banner {
-                    banner(message)
-                }
-            }
+                if let message = coordinator.banner { banner(message) }
+            }.frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .background(AppBackground(settings: settings))
         .onChange(of: coordinator.selectedTab) { tab in
             if tab == .charging { syncSelectedChargeLimit() }
         }
-        .onChange(of: settings.limit) { value in
-            syncSelectedChargeLimit(to: value)
-        }
-        .onChange(of: charge.currentLimit) { value in
-            syncSelectedChargeLimit(to: value.map { Double($0) })
-        }
-        .onChange(of: charge.availableLimits) { _ in
-            syncSelectedChargeLimit()
-        }
+        .onChange(of: settings.limit) { syncSelectedChargeLimit(to: $0) }
+        .onChange(of: charge.currentLimit) { syncSelectedChargeLimit(to: $0.map(Double.init)) }
+        .onChange(of: charge.availableLimits) { _ in syncSelectedChargeLimit() }
         .foregroundStyle(Palette.text)
         .preferredColorScheme(.dark)
-        .frame(minWidth: 790, idealWidth: 860, minHeight: 550, idealHeight: 600)
+        .environment(\.interfaceMaterial, settings.material)
+        .frame(minWidth: 960, idealWidth: 1080, minHeight: 660, idealHeight: 740)
+    }
+
+    private var sidebar: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 9) {
+                Image(systemName: AppIdentity.brandSymbol).font(.system(size: 18, weight: .medium))
+                    .foregroundStyle(Palette.green)
+                    .frame(width: 33, height: 33)
+                    .background(Palette.accentSoft, in: RoundedRectangle(cornerRadius: 10))
+                VStack(alignment: .leading, spacing: 4) {
+                    BrandText(size: 15)
+                    Text("电池养护助手").font(.system(size: 10)).foregroundStyle(Palette.tertiary)
+                }
+            }.padding(.horizontal, 18).padding(.top, 25).padding(.bottom, 30)
+            VStack(spacing: 5) {
+                ForEach([SettingsTab.dashboard, .charging, .automation, .general, .advanced, .about]) { tab in
+                    sidebarButton(tab)
+                }
+            }.padding(.horizontal, 12)
+                .accessibilityElement(children: .contain).accessibilityLabel("设置页面")
+            Spacer(minLength: 24)
+            VStack(alignment: .leading, spacing: 12) {
+                Rectangle().fill(Palette.line).frame(height: 1)
+                HStack(spacing: 7) {
+                    Circle().fill(monitor.snapshot.hasBattery ? Palette.green : Palette.tertiary).frame(width: 5, height: 5)
+                    Text(monitor.snapshot.hasBattery ? "本机电池" : "未检测到电池")
+                        .font(.system(size: 10)).foregroundStyle(Palette.secondary)
+                    Spacer()
+                    Text(monitor.snapshot.percentage.map { "\($0)%" } ?? "—")
+                        .font(.system(size: 10, weight: .medium)).foregroundStyle(Palette.text).monospacedDigit()
+                }
+                Text("版本 \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "开发版本")")
+                    .font(.system(size: 9)).foregroundStyle(Palette.tertiary)
+            }.padding(20)
+        }.frame(maxHeight: .infinity)
+            .background(Palette.sidebar.opacity(settings.material == .solid || reduceTransparency ? 1 : 0.20))
+    }
+
+    private func sidebarButton(_ tab: SettingsTab) -> some View {
+        let selected = coordinator.selectedTab == tab
+        return Button { coordinator.selectedTab = tab } label: {
+            HStack(spacing: 10) {
+                Image(systemName: symbol(for: tab)).font(.system(size: 13, weight: .medium)).frame(width: 18)
+                Text(tab == .automation ? "提醒与计划" : tab.rawValue).font(.system(size: 12, weight: selected ? .semibold : .medium))
+                Spacer(minLength: 0)
+                if selected { Circle().fill(Palette.green).frame(width: 4, height: 4) }
+            }.foregroundStyle(selected ? Palette.green : Palette.secondary)
+                .padding(.horizontal, 11).frame(height: 38)
+                .glassControl(settings: settings, cornerRadius: 9, tinted: selected, visible: selected)
+                .contentShape(RoundedRectangle(cornerRadius: 9))
+        }.buttonStyle(.plain).accessibilityLabel(tab.rawValue)
+            .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    private func symbol(for tab: SettingsTab) -> String {
+        switch tab {
+        case .dashboard: return "square.grid.2x2"
+        case .charging: return "bolt"
+        case .automation: return "bell"
+        case .general: return "slider.horizontal.3"
+        case .advanced: return "gearshape"
+        case .about: return "info.circle"
+        }
+    }
+
+    private var subtitle: String {
+        switch coordinator.selectedTab {
+        case .dashboard: return "查看实时状态与常用养护操作"
+        case .charging: return "设置充电上限，查看系统当前状态"
+        case .automation: return "管理电量、温度与定时提醒"
+        case .general: return "按你的习惯配置界面与菜单栏"
+        case .advanced: return "调整刷新频率，查看本机能力"
+        case .about: return "版本与系统兼容性"
+        }
+    }
+
+    private var header: some View {
+        HStack(alignment: .center) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(coordinator.selectedTab == .automation ? "提醒与计划" : coordinator.selectedTab.rawValue)
+                    .font(.system(size: 25, weight: .semibold)).foregroundStyle(Palette.text)
+                Text(subtitle).font(.system(size: 11)).foregroundStyle(Palette.secondary)
+            }
+            Spacer()
+            SmallButton(title: "刷新", symbol: "arrow.clockwise") {
+                monitor.refresh(); coordinator.refreshChargeState()
+            }.disabled(monitor.isRefreshing)
+                .help("刷新电池读数与系统充电状态")
+        }.padding(.horizontal, 26).padding(.top, 25).padding(.bottom, 23)
     }
 
     @ViewBuilder
     private var contentArea: some View {
         if staticRendering {
             GeometryReader { geometry in
-                pageContent
-                    .fixedSize(horizontal: false, vertical: true)
+                pageContent.fixedSize(horizontal: false, vertical: true)
                     .frame(width: geometry.size.width, height: geometry.size.height, alignment: .top)
                     .clipped()
             }
         } else {
-            ScrollView { pageContent }
-                .scrollIndicators(.hidden)
+            ScrollView { pageContent }.scrollIndicators(.automatic)
         }
     }
 
     private var pageContent: some View {
-        page
-            .frame(maxWidth: 700, alignment: .leading)
-            .padding(.horizontal, 24)
-            .padding(.top, 21)
-            .padding(.bottom, 8)
+        page.frame(maxWidth: 840, alignment: .leading)
+            .padding(.horizontal, 26).padding(.bottom, 24)
             .frame(maxWidth: .infinity, alignment: .top)
-    }
-
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 11) {
-            HStack(spacing: 12) {
-                IconTile(symbol: "gearshape.fill", color: Palette.blue)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(AppIdentity.displayName)
-                        .font(.system(size: 18, weight: .bold))
-                        .foregroundStyle(Palette.text)
-                    Text(coordinator.selectedTab.rawValue)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(Palette.secondary)
-                }
-                Spacer()
-                Text("电池养护控制台")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(Palette.secondary)
-            }
-            tabStrip
-        }
-        .padding(.horizontal, 20)
-        .padding(.top, 15)
-        .padding(.bottom, 12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(red: 0.098, green: 0.094, blue: 0.090))
-        .overlay(alignment: .bottom) {
-            Rectangle().fill(Palette.line).frame(height: 1)
-        }
-    }
-
-    private var tabStrip: some View {
-        HStack(spacing: 0) {
-            ForEach(SettingsTab.allCases) { tab in
-                tabButton(tab)
-            }
-        }
-        .frame(width: 609, height: 25)
-        .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 6))
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("设置页面")
-    }
-
-    private func tabButton(_ tab: SettingsTab) -> some View {
-        let selected = coordinator.selectedTab == tab
-        return Button {
-            coordinator.selectedTab = tab
-        } label: {
-            Text(tab.rawValue)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(selected ? Color.black : Palette.text)
-                .frame(maxWidth: .infinity)
-                .frame(height: 25)
-                .background(selected ? Palette.green : Color.clear, in: RoundedRectangle(cornerRadius: 6))
-                .overlay(alignment: .trailing) {
-                    if !selected && tab != .about {
-                        Rectangle().fill(Color.white.opacity(0.25)).frame(width: 1, height: 14)
-                    }
-                }
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
     @ViewBuilder
@@ -149,9 +166,9 @@ struct SettingsView: View {
 
     private var generalPage: some View {
         VStack(spacing: 15) {
-            SettingsCard(title: "界面材质", subtitle: "选择菜单浮层和设置窗口的透明与虚化程度。", symbol: "square.on.square", color: Palette.pink) {
+            SettingsCard(title: "界面材质", subtitle: "选择菜单浮层和设置窗口的透明与虚化程度。", symbol: "square.on.square", color: Palette.green) {
                 VStack(alignment: .leading, spacing: 10) {
-                    SegmentedChoice(choices: [(.solid, "清晰实体"), (.glass, "毛玻璃"), (.soft, "高斯柔化")], selection: $settings.material)
+                    SegmentedChoice(choices: [(.solid, "清晰实体"), (.glass, "液态玻璃"), (.soft, "高斯柔化")], selection: $settings.material)
                     HStack(spacing: 10) {
                         Image(systemName: "square.on.square")
                             .font(.system(size: 13))
@@ -163,14 +180,14 @@ struct SettingsView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
-            SettingsCard(title: "启动", subtitle: "让电池保护在登录后自动开始工作。", symbol: "power.circle.fill", color: Palette.blue) {
-                SettingRow(symbol: "arrow.up.right.square.fill", color: Palette.blue, title: "登录时启动 \(AppIdentity.displayName)", subtitle: "登录当前账户后自动显示菜单栏图标", isOn: loginBinding)
+            SettingsCard(title: "启动", subtitle: "让电池保护在登录后自动开始工作。", symbol: "power.circle.fill", color: Palette.green) {
+                SettingRow(symbol: "arrow.up.right.square.fill", color: Palette.green, title: "登录时启动 \(AppIdentity.displayName)", subtitle: "登录当前账户后自动显示菜单栏图标", isOn: loginBinding)
             }
             SettingsCard(title: "菜单栏实时读数", subtitle: "在电量、当前系统功率或两者同时显示之间切换。", symbol: "gauge.with.dots.needle.67percent", color: Palette.green) {
                 VStack(alignment: .leading, spacing: 11) {
                     SegmentedChoice(choices: [(.battery, "实时电量"), (.power, "实时功率"), (.both, "电量与功率")], selection: $settings.readout)
                     separator
-                    SettingRow(symbol: "paintpalette.fill", color: Palette.purple, title: "用颜色显示电池状态", subtitle: "充电、接通电源、低电量使用不同颜色", isOn: $settings.useColors)
+                    SettingRow(symbol: "paintpalette.fill", color: Palette.green, title: "绿色电池图标", subtitle: "图标填充反映实际电量；充电时读数也显示绿色", isOn: $settings.useColors)
                 }
             }
         }
@@ -179,7 +196,7 @@ struct SettingsView: View {
     private var materialCaption: String {
         switch settings.material {
         case .solid: return "清晰的不透明界面"
-        case .glass: return "平衡透明度与清晰度"
+        case .glass: return "系统透光与高光材质，旧版 macOS 使用磨砂效果"
         case .soft: return "更柔和的背景虚化效果"
         }
     }
@@ -191,7 +208,7 @@ struct SettingsView: View {
     private var chargingPage: some View {
         VStack(spacing: 15) {
             chargeLimitCard
-            SettingsCard(title: "系统充电管理", subtitle: "查看此 Mac 实际提供的控制能力。", symbol: "bolt.shield.fill", color: Palette.blue) {
+            SettingsCard(title: "系统充电管理", subtitle: "查看此 Mac 实际提供的控制能力。", symbol: "bolt.shield.fill", color: Palette.green) {
                 VStack(alignment: .leading, spacing: 13) {
                     infoRow("当前状态", value: coordinator.chargeStatus, color: Palette.green)
                     infoRow("系统充电上限", value: systemLimitText, color: systemLimitColor)
@@ -202,7 +219,7 @@ struct SettingsView: View {
                     HStack {
                         SmallButton(title: "打开系统电池设置", symbol: "arrow.up.right") { coordinator.openSystemBattery() }
                         Spacer()
-                        SmallButton(title: "刷新状态", symbol: "arrow.clockwise", color: Palette.blue) {
+                        SmallButton(title: "刷新状态", symbol: "arrow.clockwise", color: Palette.green) {
                             coordinator.refreshChargeState()
                             monitor.refresh()
                         }
@@ -254,7 +271,7 @@ struct SettingsView: View {
                 if charge.isSupported && charge.isEnabled {
                     HStack {
                         Spacer()
-                        SmallButton(title: "恢复系统默认管理", symbol: "arrow.uturn.backward", color: Palette.blue) {
+                        SmallButton(title: "恢复系统默认管理", symbol: "arrow.uturn.backward", color: Palette.green) {
                             coordinator.restoreSystemManagement()
                         }
                         .disabled(coordinator.temporaryFull || !monitor.snapshot.hasBattery || !charge.hasKnownState)
@@ -319,16 +336,16 @@ struct SettingsView: View {
                 }
             }
             dailyReminderCard
-            SettingsCard(title: "通知权限", subtitle: "首次开启提醒时，macOS 会请求通知权限。", symbol: "app.badge.fill", color: Palette.purple) {
+            SettingsCard(title: "通知权限", subtitle: "首次开启提醒时，macOS 会请求通知权限。", symbol: "app.badge.fill", color: Palette.green) {
                 HStack {
                     Text(coordinator.notificationStatus)
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(coordinator.notificationStatus == "已允许" ? Palette.green : Palette.secondary)
                     Spacer()
-                    SmallButton(title: "刷新权限状态", symbol: "arrow.clockwise", color: Palette.purple) {
+                    SmallButton(title: "刷新权限状态", symbol: "arrow.clockwise", color: Palette.green) {
                         coordinator.updateNotificationStatus()
                     }
-                    SmallButton(title: "通知设置", symbol: "arrow.up.right", color: Palette.blue) {
+                    SmallButton(title: "通知设置", symbol: "arrow.up.right", color: Palette.green) {
                         coordinator.openSystemNotifications()
                     }
                 }
@@ -372,9 +389,9 @@ struct SettingsView: View {
     }
 
     private var dailyReminderCard: some View {
-        SettingsCard(title: "每日养护提醒", subtitle: "每天在选定时间提示查看电池状态。", symbol: "calendar.badge.clock", color: Palette.blue) {
+        SettingsCard(title: "每日养护提醒", subtitle: "每天在选定时间提示查看电池状态。", symbol: "calendar.badge.clock", color: Palette.green) {
             VStack(alignment: .leading, spacing: 13) {
-                SettingRow(symbol: "clock.fill", color: Palette.blue, title: "开启每日提醒", subtitle: "\(AppIdentity.displayName) 运行时，按本机当前时间提醒", isOn: notificationBinding(\AppSettings.scheduleEnabled))
+                SettingRow(symbol: "clock.fill", color: Palette.green, title: "开启每日提醒", subtitle: "\(AppIdentity.displayName) 运行时，按本机当前时间提醒", isOn: notificationBinding(\AppSettings.scheduleEnabled))
                 separator
                 HStack(spacing: 8) {
                     Text("提醒时间").font(.system(size: 13, weight: .medium)).foregroundStyle(Palette.secondary)
@@ -439,21 +456,24 @@ struct SettingsView: View {
 
     private var advancedPage: some View {
         VStack(spacing: 15) {
-            SettingsCard(title: "数据刷新", subtitle: "设置电池读数与 App 活动的刷新频率。", symbol: "arrow.clockwise.circle.fill", color: Palette.blue) {
+            SettingsCard(title: "数据刷新", subtitle: "设置电池读数刷新频率，后台继续监测电池状态。", symbol: "arrow.clockwise.circle.fill", color: Palette.green) {
                 VStack(alignment: .leading, spacing: 12) {
                     SegmentedChoice(choices: [(2.0, "2 秒"), (5.0, "5 秒"), (10.0, "10 秒"), (30.0, "30 秒")], selection: $settings.refreshInterval)
+                    Text("App 活动仅在仪表盘打开时每 15 秒更新；关闭仪表盘后停止查询。")
+                        .font(.system(size: 11)).foregroundStyle(Palette.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     HStack {
                         Text("最近更新：\(monitor.snapshot.updatedAt.formatted(date: .omitted, time: .standard))")
                             .font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.secondary)
                         Spacer()
-                        SmallButton(title: "立即刷新", symbol: "arrow.clockwise", color: Palette.blue) {
+                        SmallButton(title: "立即刷新", symbol: "arrow.clockwise", color: Palette.green) {
                             monitor.refresh()
                             charge.refresh()
                         }
                     }
                 }
             }
-            SettingsCard(title: "本机能力", subtitle: "各项功能以当前 Mac 和系统提供的数据为准。", symbol: "cpu.fill", color: Palette.purple) {
+            SettingsCard(title: "本机能力", subtitle: "各项功能以当前 Mac 和系统提供的数据为准。", symbol: "cpu.fill", color: Palette.green) {
                 VStack(alignment: .leading, spacing: 11) {
                     infoRow("内置电池", value: monitor.snapshot.hasBattery ? "已检测到" : "未检测到", color: monitor.snapshot.hasBattery ? Palette.green : Palette.secondary)
                     infoRow("系统充电上限", value: systemLimitText, color: systemLimitColor)
@@ -480,11 +500,12 @@ struct SettingsView: View {
 
     private var aboutPage: some View {
         VStack(spacing: 15) {
-            SettingsCard(title: "关于 \(AppIdentity.displayName)", subtitle: "按照提供的截图重新制作的本地 macOS 应用。", symbol: "leaf.fill", color: Palette.green) {
+            SettingsCard(title: "关于 \(AppIdentity.displayName)", subtitle: "为日常使用设计的原生电池养护工具。", symbol: AppIdentity.brandSymbol, color: Palette.green) {
                 VStack(alignment: .leading, spacing: 15) {
                     HStack(alignment: .firstTextBaseline, spacing: 12) {
                         BrandText(size: 28)
-                        Text("1.0").font(.system(size: 13, weight: .semibold)).foregroundStyle(Palette.secondary)
+                        Text(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "开发版本")
+                            .font(.system(size: 13, weight: .semibold)).foregroundStyle(Palette.secondary)
                     }
                     Text("实时查看电量、温度、电池健康与功率，在系统支持时设置原生充电上限。")
                         .font(.system(size: 13)).foregroundStyle(Palette.text)
@@ -495,12 +516,12 @@ struct SettingsView: View {
                     infoRow("数据保存", value: "本机偏好设置", color: Palette.secondary)
                 }
             }
-            SettingsCard(title: "系统兼容性", subtitle: "充电控制取决于 macOS 当前提供的原生能力。", symbol: "desktopcomputer", color: Palette.blue) {
+            SettingsCard(title: "系统兼容性", subtitle: "充电控制取决于 macOS 当前提供的原生能力。", symbol: "desktopcomputer", color: Palette.green) {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("原生充电上限通过可用时的 PowerUI 接口完成。该接口可能随系统版本变化；接口不可用时，可打开系统电池设置。")
                         .font(.system(size: 12)).foregroundStyle(Palette.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    SmallButton(title: "打开系统电池设置", symbol: "arrow.up.right", color: Palette.blue) { coordinator.openSystemBattery() }
+                    SmallButton(title: "打开系统电池设置", symbol: "arrow.up.right", color: Palette.green) { coordinator.openSystemBattery() }
                 }
             }
         }

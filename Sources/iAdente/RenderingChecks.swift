@@ -7,8 +7,10 @@ import SwiftUI
 func renderApplicationViews(to directory: String) throws {
     try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
     let coordinator = AppCoordinator(renderingOnly: true)
+    coordinator.monitor.setAppSamplingVisible(true, source: .settingsDashboard)
+    defer { coordinator.monitor.setAppSamplingVisible(false, source: .settingsDashboard) }
     let deadline = Date().addingTimeInterval(3)
-    while !coordinator.monitor.snapshot.hasBattery && Date() < deadline {
+    while (!coordinator.monitor.snapshot.hasBattery || coordinator.monitor.appsUpdatedAt == nil) && Date() < deadline {
         RunLoop.main.run(until: Date().addingTimeInterval(0.05))
     }
     func render<V: View>(_ view: V, size: NSSize, name: String) throws {
@@ -23,10 +25,32 @@ func renderApplicationViews(to directory: String) throws {
     }
     for tab in SettingsTab.allCases {
         coordinator.selectedTab = tab
-        try render(SettingsView(coordinator: coordinator), size: NSSize(width: 860, height: 600), name: "settings-\(tab.id).png")
+        try render(SettingsView(coordinator: coordinator), size: NSSize(width: 1080, height: 740), name: "settings-\(tab.id).png")
     }
+    coordinator.selectedTab = .dashboard
+    try render(SettingsView(coordinator: coordinator), size: NSSize(width: 960, height: 680), name: "settings-dashboard-minimum.png")
+    try render(SettingsView(coordinator: coordinator), size: NSSize(width: 1080, height: 1000), name: "settings-dashboard-full.png")
     try render(DashboardView(coordinator: coordinator), size: NSSize(width: 410, height: 720), name: "menu-dashboard.png")
-    try render(DashboardContent(coordinator: coordinator, compact: true).padding(14).background(AppBackground(settings: coordinator.settings)), size: NSSize(width: 410, height: 1060), name: "dashboard-full.png")
+    try render(DashboardContent(coordinator: coordinator, compact: true).padding(18).background(AppBackground(settings: coordinator.settings)), size: NSSize(width: 410, height: 1700), name: "dashboard-full.png")
+    // Explicitly isolated demonstrations; production preferences and telemetry
+    // are never modified to produce these layout checks.
+    let example = AppCoordinator(preview: true, renderingOnly: true)
+    let priorMaterial = example.settings.material
+    defer { example.settings.material = priorMaterial }
+    for material in InterfaceMaterial.allCases {
+        example.settings.material = material
+        example.selectedTab = .general
+        try render(SettingsView(coordinator: example), size: NSSize(width: 1080, height: 740), name: "material-example-\(material.rawValue).png")
+    }
+    example.settings.material = .solid
+    example.selectedTab = .dashboard
+    var charging = BatterySnapshot.preview
+    charging.percentage = 55; charging.isCharging = true; charging.temperature = 34
+    charging.batteryPower = 22; charging.systemPower = 30; charging.adapterPower = 52
+    example.monitor.snapshot = charging
+    try render(SettingsView(coordinator: example), size: NSSize(width: 960, height: 680), name: "dashboard-example-charging.png")
+    example.monitor.snapshot = BatterySnapshot()
+    try render(SettingsView(coordinator: example), size: NSSize(width: 960, height: 680), name: "dashboard-example-unavailable.png")
     print("Rendered all 6 tabs and the menu dashboard with real telemetry to \(directory)")
 }
 
@@ -48,12 +72,15 @@ func renderPowerFlowViews(to directory: String) throws {
     discharging.adapterPower = nil; discharging.systemPower = 21; discharging.batteryPower = -21
     var missing = BatterySnapshot.preview
     missing.adapterPower = nil; missing.systemPower = nil; missing.batteryPower = nil
+    var estimated = discharging
+    estimated.systemPowerSource = .batteryDischargeEstimate
 
     for (name, sample, caption, width) in [
         ("power-current.png", monitor.snapshot, "当前实测", CGFloat(382)),
         ("power-charging.png", charging, "充电状态示意", CGFloat(382)),
         ("power-battery.png", discharging, "电池供电示意", CGFloat(382)),
         ("power-missing.png", missing, "缺失读数示意", CGFloat(382)),
+        ("power-estimated.png", estimated, "放电估算示意", CGFloat(382)),
         ("power-wide.png", charging, "宽窗口布局示意", CGFloat(700))
     ] {
         let content = VStack(spacing: 12) {
@@ -64,8 +91,8 @@ func renderPowerFlowViews(to directory: String) throws {
                 Text(caption).font(.system(size: 10)).foregroundStyle(Palette.secondary)
             }.foregroundStyle(Palette.text)
             PowerFlowDiagram(snapshot: sample).frame(height: 174)
-        }.padding(14).frame(width: width).background(Color(white: 0.18), in: RoundedRectangle(cornerRadius: 16))
-        let renderer = ImageRenderer(content: content.environment(\.colorScheme, .dark))
+        }.padding(18).frame(width: width).background(Palette.surface, in: RoundedRectangle(cornerRadius: 16))
+        let renderer = ImageRenderer(content: content.environment(\.staticRendering, true).environment(\.colorScheme, .dark))
         renderer.scale = 2
         guard let image = renderer.cgImage,
               let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:]) else {
@@ -108,8 +135,8 @@ func renderQuickCareViews(to directory: String) throws {
         let content = QuickCareCard(state: state, feedback: feedback,
                                     onPreset: { _ in }, onTemporary: {}, onDefault: {},
                                     onSystemSettings: {}, onDismissFeedback: {})
-            .padding(14).frame(width: 410).background(Color(white: 0.22))
-            .environment(\.colorScheme, .dark)
+            .padding(18).frame(width: 410).background(Palette.background)
+            .environment(\.staticRendering, true).environment(\.colorScheme, .dark)
         let renderer = ImageRenderer(content: content)
         renderer.scale = 2
         guard let image = renderer.cgImage,
@@ -215,7 +242,7 @@ func renderProtectionViews(to directory: String) throws {
     for (name, sample, width) in cases {
         let content = ProtectionCard(state: sample, reminderEnabled: .constant(sample.reminderEnabled),
                                      onReminderSettings: {}, onChargeSettings: {}, onNotificationSettings: {})
-            .padding(14).frame(width: width).background(Color(white: 0.22))
+            .padding(18).frame(width: width).background(Palette.background)
             .environment(\.staticRendering, true).environment(\.colorScheme, .dark)
         let renderer = ImageRenderer(content: content)
         renderer.scale = 2

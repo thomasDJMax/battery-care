@@ -100,9 +100,11 @@ final class DashboardPanelController {
         // to the app's desktop Space. The panel alone receives keyboard focus.
         panel.makeKeyAndOrderFront(nil)
         panel.orderFrontRegardless()
+        coordinator.monitor.setAppSamplingVisible(true, source: .menuDashboard)
     }
 
     func close() {
+        coordinator.monitor.setAppSamplingVisible(false, source: .menuDashboard)
         NotificationCenter.default.post(name: .iadenteDashboardClosed, object: nil)
         if let sheet = panel.attachedSheet {
             panel.endSheet(sheet)
@@ -164,11 +166,11 @@ private struct DashboardPanelContent: View {
         }
         .frame(width: 410, height: height)
         .background(alignment: .topLeading) {
-            MenuArrow().fill(Color(white: coordinator.settings.material == .solid ? 0.19 : 0.36))
+            MenuArrow().fill(Palette.background)
                 .frame(width: 18, height: 8).offset(x: arrowX - 9)
         }
         .clipShape(MenuBubble(arrowX: arrowX))
-        .overlay { MenuBubble(arrowX: arrowX).stroke(Color.white.opacity(0.16), lineWidth: 1) }
+        .overlay { MenuBubble(arrowX: arrowX).stroke(Palette.line, lineWidth: 1) }
         .preferredColorScheme(.dark)
     }
 }

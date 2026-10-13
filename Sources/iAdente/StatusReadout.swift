@@ -5,55 +5,67 @@ enum StatusReadout {
     static let batterySize = NSSize(width: 24, height: 16)
     static let batteryGreen = NSColor(calibratedRed: 0.18, green: 0.84, blue: 0.50, alpha: 1)
 
-    /// The bolt is drawn inside the battery body so it stays recognizable at
-    /// menu bar size, including when the battery is full on external power.
-    static func powerConnectedBattery(color: NSColor) -> NSImage {
+    /// Unknown capacity keeps an empty outline instead of suggesting a full
+    /// battery. A template image lets the menu bar choose contrasting ink.
+    static func batteryImage(percentage: Int?, powerConnected: Bool, useColors: Bool) -> NSImage {
+        let color = useColors ? batteryGreen : NSColor.black
         let image = NSImage(size: batterySize)
         image.lockFocus()
-        // Draw the original vector geometry at a larger logical size, keeping
-        // the battery outline and bolt crisp on Retina displays.
-        NSGraphicsContext.saveGraphicsState()
-        let scale = NSAffineTransform()
-        scale.scale(by: 4.0 / 3.0)
-        scale.concat()
         color.setStroke()
-        let body = NSBezierPath(roundedRect: NSRect(x: 0.6, y: 1.1, width: 15.1, height: 9.8), xRadius: 2, yRadius: 2)
-        body.lineWidth = 1.1
+        let body = NSBezierPath(roundedRect: NSRect(x: 0.8, y: 2, width: 20.2, height: 12), xRadius: 2.6, yRadius: 2.6)
+        body.lineWidth = 1.3
         body.stroke()
         color.setFill()
-        NSBezierPath(roundedRect: NSRect(x: 2.1, y: 2.5, width: 12.1, height: 7), xRadius: 0.8, yRadius: 0.8).fill()
-        NSBezierPath(roundedRect: NSRect(x: 16.3, y: 4, width: 1.5, height: 4), xRadius: 0.6, yRadius: 0.6).fill()
-        let bolt = NSBezierPath()
-        bolt.move(to: NSPoint(x: 9.3, y: 10.0))
-        bolt.line(to: NSPoint(x: 5.8, y: 5.4))
-        bolt.line(to: NSPoint(x: 8.0, y: 5.4))
-        bolt.line(to: NSPoint(x: 6.8, y: 2.0))
-        bolt.line(to: NSPoint(x: 11.1, y: 6.7))
-        bolt.line(to: NSPoint(x: 8.9, y: 6.7))
-        bolt.close()
-        NSColor.white.setFill()
-        bolt.fill()
-        NSGraphicsContext.restoreGraphicsState()
+        NSBezierPath(roundedRect: NSRect(x: 22, y: 5, width: 1.6, height: 6), xRadius: 0.7, yRadius: 0.7).fill()
+        if let percentage, percentage > 0 {
+            let width = 16.2 * CGFloat(min(100, percentage)) / 100
+            NSBezierPath(roundedRect: NSRect(x: 2.8, y: 4, width: width, height: 8), xRadius: min(1, width / 2), yRadius: 1).fill()
+        }
+        if powerConnected {
+            let bolt = NSBezierPath()
+            bolt.move(to: NSPoint(x: 13.2, y: 13))
+            bolt.line(to: NSPoint(x: 8.4, y: 7))
+            bolt.line(to: NSPoint(x: 11, y: 7))
+            bolt.line(to: NSPoint(x: 9.8, y: 3))
+            bolt.line(to: NSPoint(x: 15.7, y: 9.2))
+            bolt.line(to: NSPoint(x: 12.6, y: 9.2))
+            bolt.close()
+            if useColors {
+                NSColor.white.setFill()
+                bolt.fill()
+            } else {
+                // Opaque white would become menu-bar ink in a template, too.
+                // Knock out the bolt and retain its outer outline.
+                color.setStroke()
+                bolt.lineWidth = 1
+                bolt.stroke()
+                NSGraphicsContext.saveGraphicsState()
+                NSGraphicsContext.current?.compositingOperation = .destinationOut
+                color.setFill()
+                bolt.fill()
+                NSGraphicsContext.restoreGraphicsState()
+            }
+        }
         image.unlockFocus()
-        image.isTemplate = false
-        image.accessibilityDescription = "电池已连接电源，内部闪电标志"
+        image.isTemplate = !useColors
+        let capacity = percentage.map { "\(min(100, max(0, $0)))%" } ?? "电量未知"
+        image.accessibilityDescription = powerConnected ? "电源已连接，\(capacity)" : "电池，\(capacity)"
         return image
     }
 
-    /// A non-template image retains the requested charging green through menu
-    /// bar vibrancy. The normal readout continues to use native title contrast.
-    static func chargingImage(text: String) -> NSImage {
-        let green = batteryGreen
+    /// A non-template image retains charging green through menu bar vibrancy.
+    /// Normal, non-charging text keeps native title contrast.
+    static func chargingImage(text: String, percentage: Int?) -> NSImage {
         let font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
-        let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: green]
+        let attributes: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: batteryGreen]
         let string = NSAttributedString(string: text, attributes: attributes)
         let textSize = string.size()
         let textX = batterySize.width + 5
         let size = NSSize(width: ceil(textSize.width) + textX, height: 18)
         let image = NSImage(size: size)
         image.lockFocus()
-        let battery = powerConnectedBattery(color: green)
-        battery.draw(in: NSRect(x: 0, y: 1, width: batterySize.width, height: batterySize.height))
+        batteryImage(percentage: percentage, powerConnected: true, useColors: true)
+            .draw(in: NSRect(x: 0, y: 1, width: batterySize.width, height: batterySize.height))
         string.draw(at: NSPoint(x: textX, y: floor((size.height - textSize.height) / 2)))
         image.unlockFocus()
         image.isTemplate = false

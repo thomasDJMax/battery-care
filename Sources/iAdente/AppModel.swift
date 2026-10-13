@@ -19,18 +19,42 @@ final class AppSettings: ObservableObject {
     @Published var material: InterfaceMaterial { didSet { defaults.set(material.rawValue, forKey: "material") } }
     @Published var readout: MenuReadout { didSet { defaults.set(readout.rawValue, forKey: "readout") } }
     @Published var useColors: Bool { didSet { defaults.set(useColors, forKey: "useColors") } }
-    @Published var limit: Double { didSet { defaults.set(limit, forKey: "chargeLimit") } }
+    @Published var limit: Double { didSet {
+        let normalized = AppSettingBounds.limit(limit)
+        if !limit.isFinite || limit != normalized { limit = normalized }
+        defaults.set(normalized, forKey: "chargeLimit")
+    } }
     @Published var limitReminder: Bool { didSet { defaults.set(limitReminder, forKey: "limitReminder") } }
     @Published var lowBatteryReminder: Bool { didSet { defaults.set(lowBatteryReminder, forKey: "lowBatteryReminder") } }
     @Published var highTemperatureReminder: Bool { didSet { defaults.set(highTemperatureReminder, forKey: "highTemperatureReminder") } }
-    @Published var highTemperatureThreshold: Double { didSet { defaults.set(highTemperatureThreshold, forKey: "highTemperatureThreshold") } }
-    @Published var lowBatteryThreshold: Double { didSet { defaults.set(lowBatteryThreshold, forKey: "lowBatteryThreshold") } }
-    @Published var refreshInterval: Double { didSet { defaults.set(refreshInterval, forKey: "refreshInterval") } }
+    @Published var highTemperatureThreshold: Double { didSet {
+        let normalized = AppSettingBounds.temperature(highTemperatureThreshold)
+        if !highTemperatureThreshold.isFinite || highTemperatureThreshold != normalized { highTemperatureThreshold = normalized }
+        defaults.set(normalized, forKey: "highTemperatureThreshold")
+    } }
+    @Published var lowBatteryThreshold: Double { didSet {
+        let normalized = AppSettingBounds.lowBattery(lowBatteryThreshold)
+        if !lowBatteryThreshold.isFinite || lowBatteryThreshold != normalized { lowBatteryThreshold = normalized }
+        defaults.set(normalized, forKey: "lowBatteryThreshold")
+    } }
+    @Published var refreshInterval: Double { didSet {
+        let normalized = AppSettingBounds.refresh(refreshInterval)
+        if !refreshInterval.isFinite || refreshInterval != normalized { refreshInterval = normalized }
+        defaults.set(normalized, forKey: "refreshInterval")
+    } }
     @Published var scheduleEnabled: Bool { didSet { defaults.set(scheduleEnabled, forKey: "scheduleEnabled") } }
-    @Published var scheduleHour: Int { didSet { defaults.set(scheduleHour, forKey: "scheduleHour") } }
-    @Published var scheduleMinute: Int { didSet { defaults.set(scheduleMinute, forKey: "scheduleMinute") } }
-    init(preview: Bool = false) {
-        defaults = preview ? UserDefaults(suiteName: "cn.local.iadente.preview")! : .standard
+    @Published var scheduleHour: Int { didSet {
+        let normalized = AppSettingBounds.hour(scheduleHour)
+        if scheduleHour != normalized { scheduleHour = normalized }
+        defaults.set(normalized, forKey: "scheduleHour")
+    } }
+    @Published var scheduleMinute: Int { didSet {
+        let normalized = AppSettingBounds.minute(scheduleMinute)
+        if scheduleMinute != normalized { scheduleMinute = normalized }
+        defaults.set(normalized, forKey: "scheduleMinute")
+    } }
+    init(preview: Bool = false, store: UserDefaults? = nil) {
+        defaults = store ?? (preview ? UserDefaults(suiteName: "cn.local.iadente.preview")! : .standard)
         material = InterfaceMaterial(rawValue: defaults.string(forKey: "material") ?? "glass") ?? .glass
         readout = MenuReadout(rawValue: defaults.string(forKey: "readout") ?? "both") ?? .both
         useColors = defaults.object(forKey: "useColors") as? Bool ?? true
@@ -41,11 +65,11 @@ final class AppSettings: ObservableObject {
         highTemperatureReminder = defaults.bool(forKey: "highTemperatureReminder")
         let temperatureThreshold = defaults.object(forKey: "highTemperatureThreshold") as? Double ?? 40
         highTemperatureThreshold = temperatureThreshold.isFinite ? min(55, max(35, temperatureThreshold.rounded())) : 40
-        lowBatteryThreshold = defaults.object(forKey: "lowBatteryThreshold") as? Double ?? 20
-        refreshInterval = defaults.object(forKey: "refreshInterval") as? Double ?? 5
+        lowBatteryThreshold = AppSettingBounds.lowBattery(defaults.object(forKey: "lowBatteryThreshold") as? Double ?? 20)
+        refreshInterval = AppSettingBounds.refresh(defaults.object(forKey: "refreshInterval") as? Double ?? 5)
         scheduleEnabled = defaults.bool(forKey: "scheduleEnabled")
-        scheduleHour = defaults.object(forKey: "scheduleHour") as? Int ?? 9
-        scheduleMinute = defaults.object(forKey: "scheduleMinute") as? Int ?? 0
+        scheduleHour = AppSettingBounds.hour(defaults.object(forKey: "scheduleHour") as? Int ?? 9)
+        scheduleMinute = AppSettingBounds.minute(defaults.object(forKey: "scheduleMinute") as? Int ?? 0)
     }
     func reset() {
         material = .glass; readout = .both; useColors = true
@@ -118,6 +142,12 @@ final class NativeChargeController: ObservableObject {
         message = "系统充电上限已设为 \(target)%"
         return true
     }
+    func confirmSubmittedSystemManagement() -> Bool {
+        guard hasKnownState && !isEnabled else { return false }
+        operationConfirmed = true
+        message = "已交还系统默认充电管理"
+        return true
+    }
 }
 
 @MainActor
@@ -141,12 +171,14 @@ final class AppCoordinator: NSObject, ObservableObject, UNUserNotificationCenter
     private var previousLimitNotice = false
     private var previousLowNotice = false
     private var lastScheduleDay: Date? = nil
-    private var temporaryStarted: Date? = nil
-    private var temporaryRestoreLimit: Int? = nil
-    private var temporaryRestoreEnabled = false
-    private var temporaryAwaitingConfirmation = false
-    private var temporaryRestorePending = false
-    private var pendingChargeLimit: Int? = nil
+    private let temporaryStore = TemporaryChargeSessionStore()
+    private var temporarySession: TemporaryChargeSession? = nil
+    private var temporaryStarted: Date? { temporarySession?.startedAt }
+    private var temporaryRestoreLimit: Int? { temporarySession?.originalLimit }
+    private var temporaryRestoreEnabled: Bool? { temporarySession?.originalEnabled }
+    private var temporaryAwaitingConfirmation: Bool { temporarySession?.awaitingFullConfirmation == true }
+    private var temporaryRestorePending: Bool { temporarySession?.phase == .restoring }
+    private var chargeActions = ChargeActionTracker()
     private var lastRestoreAttempt: Date? = nil
     private var temperatureGate = TemperatureReminderGate()
     private var notificationSoundAllowed = false
@@ -170,27 +202,23 @@ final class AppCoordinator: NSObject, ObservableObject, UNUserNotificationCenter
         }
         if !preview && !renderingOnly {
             temperatureGate = TemperatureReminderGate(lastNotifiedAt: UserDefaults.standard.object(forKey: "lastTemperatureNoticeAt") as? Date)
-            let pending = UserDefaults.standard.integer(forKey: "temporaryRestoreLimit")
-            // A temporarily unavailable sensor must not erase the recovery point.
-            let awaiting = UserDefaults.standard.bool(forKey: "temporaryAwaitingConfirmation")
-            let restoring = UserDefaults.standard.bool(forKey: "temporaryRestorePending")
-            if (1...100).contains(pending), awaiting || restoring || !charge.hasKnownState || charge.readback.confirms(100) {
+            let recovery = temporaryStore.load()
+            banner = recovery.warning
+            // Prepared or uncertain requests retain the recovery point across a restart.
+            if let session = recovery.session,
+               session.awaitingFullConfirmation || session.phase == .restoring || session.originalEnabled == nil || !charge.hasKnownState || charge.readback.confirms(100) {
                 temporaryFull = true
-                temporaryAwaitingConfirmation = awaiting
-                temporaryRestorePending = restoring
-                temporaryRestoreLimit = pending
-                temporaryRestoreEnabled = UserDefaults.standard.bool(forKey: "temporaryRestoreEnabled")
-                temporaryStarted = UserDefaults.standard.object(forKey: "temporaryStartedAt") as? Date ?? Date()
-                settings.limit = Double(pending)
+                temporarySession = session
+                settings.limit = Double(session.originalLimit)
             } else {
-                clearTemporaryState()
+                if recovery.session != nil { clearTemporaryState() }
                 if let limit = charge.currentLimit { settings.limit = Double(limit) }
             }
             monitor.setRefreshInterval(settings.refreshInterval)
             UNUserNotificationCenter.current().delegate = self
         }
         monitor.$snapshot.dropFirst().sink { [weak self] snapshot in self?.handle(snapshot) }.store(in: &subscriptions)
-        settings.$refreshInterval.dropFirst().sink { [weak self] seconds in self?.monitor.setRefreshInterval(seconds) }.store(in: &subscriptions)
+        settings.$refreshInterval.dropFirst().sink { [weak self] seconds in self?.monitor.setRefreshInterval(AppSettingBounds.refresh(seconds)) }.store(in: &subscriptions)
         settings.$highTemperatureReminder.removeDuplicates().dropFirst().sink { [weak self] enabled in
             guard let self else { return }
             self.invalidatePendingTemperatureNotice()
@@ -201,7 +229,7 @@ final class AppCoordinator: NSObject, ObservableObject, UNUserNotificationCenter
             guard let self else { return }
             self.invalidatePendingTemperatureNotice()
             self.temperatureNotificationMessage = nil
-            self.processTemperatureReminder(self.monitor.snapshot, threshold: threshold)
+            self.processTemperatureReminder(self.monitor.snapshot, threshold: AppSettingBounds.temperature(threshold))
         }.store(in: &subscriptions)
     }
     var chargeStatus: String {
@@ -215,12 +243,14 @@ final class AppCoordinator: NSObject, ObservableObject, UNUserNotificationCenter
                        pendingTemporaryStatus: pendingTemporaryStatus)
     }
     private var pendingTemporaryStatus: String? {
+        if temporaryFull && temporaryRestoreEnabled == nil { return "恢复方式待确认" }
         if temporaryRestorePending { return "恢复原设置中" }
         if temporaryAwaitingConfirmation { return "临时请求待确认" }
         return nil
     }
     private var temporaryRestoreDescription: String {
-        temporaryRestoreEnabled ? "\(temporaryRestoreLimit ?? 100)% 上限" : "系统默认管理"
+        guard let enabled = temporaryRestoreEnabled else { return "原设置（恢复方式待确认）" }
+        return enabled ? "\(temporaryRestoreLimit ?? 100)% 上限" : "系统默认管理"
     }
     var protectionState: ProtectionState {
         ProtectionState(snapshot: monitor.snapshot, isChargeSupported: charge.isSupported,
@@ -269,27 +299,31 @@ final class AppCoordinator: NSObject, ObservableObject, UNUserNotificationCenter
         charge.refresh()
         if !temporaryFull && charge.hasKnownState {
             if let actual = charge.currentLimit { settings.limit = Double(actual) }
-            if let target = pendingChargeLimit, charge.confirmSubmittedLimit(target) {
-                pendingChargeLimit = nil
+            if let action = chargeActions.confirm(charge.readback) {
+                switch action {
+                case .limit(let target): _ = charge.confirmSubmittedLimit(target)
+                case .systemManagement: _ = charge.confirmSubmittedSystemManagement()
+                }
                 banner = charge.message
             }
         }
         // A known external change takes precedence over the old recovery point.
         // Unknown readings keep that point available for a later retry.
         if temporaryFull && charge.hasKnownState && temporaryRestorePending {
-            if let limit = temporaryRestoreLimit, charge.readback.confirmsRestore(limit: limit, enabled: temporaryRestoreEnabled) {
-                if let actual = charge.currentLimit { settings.limit = Double(actual) }
-                clearTemporaryState()
-                banner = "原充电设置已恢复。"
-            }
+            if temporarySession?.confirmsRestoration(charge.readback) == true {
+                completeTemporaryRestoration()
+            } else { banner = "恢复请求仍待系统确认，原恢复点已保留。" }
             return
         }
         if temporaryFull && temporaryAwaitingConfirmation {
             guard charge.readback.confirms(100) else { return }
-            temporaryAwaitingConfirmation = false
-            UserDefaults.standard.set(false, forKey: "temporaryAwaitingConfirmation")
+            if var session = temporarySession {
+                session.phase = .charging
+                temporarySession = session
+                persistTemporarySession(session)
+            }
         }
-        if temporaryFull && charge.hasKnownState && !charge.readback.confirms(100) {
+        if temporaryFull && temporaryRestoreEnabled != nil && charge.hasKnownState && !charge.readback.confirms(100) {
             clearTemporaryState()
             if let limit = charge.currentLimit { settings.limit = Double(limit) }
             banner = "系统充电设置已更改，临时充满已结束。"
@@ -310,7 +344,7 @@ final class AppCoordinator: NSObject, ObservableObject, UNUserNotificationCenter
         guard monitor.snapshot.hasBattery else { banner = "此 Mac 未检测到内置电池。"; return }
         charge.refresh()
         if charge.apply(limit: limit) {
-            pendingChargeLimit = charge.operationConfirmed ? nil : limit
+            chargeActions.submitted(.limit(limit), confirmed: charge.operationConfirmed)
             if charge.operationConfirmed {
                 if let actual = charge.currentLimit { settings.limit = Double(actual) }
                 clearTemporaryState()
@@ -320,27 +354,37 @@ final class AppCoordinator: NSObject, ObservableObject, UNUserNotificationCenter
     }
     func startTemporaryFull() {
         guard !preview else { return }
+        guard !renderingOnly else { banner = "仅渲染模式不更改系统充电设置。"; return }
         guard !temporaryFull else { banner = "临时充满已在进行，原充电设置已保留。"; return }
+        guard chargeActions.pending == nil else { banner = "上一次充电设置仍待系统确认，请刷新确认后再临时充满。"; return }
         charge.refresh()
         if let reason = quickCareState.temporaryBlockReason { banner = reason; return }
         guard let priorLimit = charge.currentLimit, charge.availableLimits.contains(priorLimit) else {
             banner = "原充电设置尚未读到，请刷新后再试。"; return
         }
         let priorEnabled = charge.isEnabled
+        var session = TemporaryChargeSession(originalLimit: priorLimit, originalEnabled: priorEnabled,
+            startedAt: Date(), phase: .prepared)
+        // Preserve a complete, verified recovery point before submitting 100%.
+        do { try temporaryStore.save(session) }
+        catch { banner = "无法保存原充电设置，尚未提交临时充满请求：\(error.localizedDescription)"; return }
+        temporarySession = session
+        temporaryFull = true
         if charge.apply(limit: 100) {
-            temporaryFull = true; temporaryStarted = Date()
-            temporaryAwaitingConfirmation = !charge.operationConfirmed
-            temporaryRestoreLimit = priorLimit; temporaryRestoreEnabled = priorEnabled
-            UserDefaults.standard.set(priorLimit, forKey: "temporaryRestoreLimit")
-            UserDefaults.standard.set(priorEnabled, forKey: "temporaryRestoreEnabled")
-            UserDefaults.standard.set(temporaryStarted, forKey: "temporaryStartedAt")
-            UserDefaults.standard.set(temporaryAwaitingConfirmation, forKey: "temporaryAwaitingConfirmation")
+            chargeActions.clear()
+            session.phase = charge.operationConfirmed ? .charging : .awaitingFullConfirmation
+            temporarySession = session
             banner = charge.operationConfirmed ? "临时充至 100% 已开启，完成后恢复原来的充电设置。" : "临时 100% 请求已提交，等待系统确认；原设置已保留。"
-        } else { banner = charge.message }
+            persistTemporarySession(session)
+        } else {
+            clearTemporaryState()
+            banner = charge.message
+        }
     }
     func cancelTemporaryFull() { _ = restoreTemporaryFull() }
     @discardableResult
-    func restoreTemporaryFull() -> Bool {
+    func restoreTemporaryFull(automatically: Bool = false) -> Bool {
+        guard !renderingOnly else { banner = "仅渲染模式不更改系统充电设置。"; return false }
         guard temporaryFull, let limit = temporaryRestoreLimit else { return true }
         let wasRestorePending = temporaryRestorePending
         refreshChargeState()
@@ -349,33 +393,75 @@ final class AppCoordinator: NSObject, ObservableObject, UNUserNotificationCenter
             banner = "暂时未能确认系统充电状态，原设置已保留，请稍后重试。"
             return false
         }
-        let accepted = temporaryRestoreEnabled ? charge.apply(limit: limit) : charge.disable()
-        let restored = accepted && charge.readback.confirmsRestore(limit: limit, enabled: temporaryRestoreEnabled)
-        if restored {
-            settings.limit = Double(temporaryRestoreEnabled ? limit : (charge.currentLimit ?? 100))
-            clearTemporaryState()
-        } else if accepted {
-            temporaryRestorePending = true
-            UserDefaults.standard.set(true, forKey: "temporaryRestorePending")
+        guard let enabled = temporaryRestoreEnabled, var session = temporarySession else {
+            banner = "旧恢复记录缺少原管理方式，已保留原上限；请在系统电池设置中确认，未提交恢复操作。"
+            return false
         }
-        banner = restored || !accepted ? charge.message : "恢复请求已提交，等待系统确认；原设置已保留。"
+        // A submitted restore whose state is already confirmed needs only record
+        // cleanup. Retrying that cleanup must not submit another hardware write.
+        if session.phase == .restoring && session.confirmsRestoration(charge.readback) {
+            completeTemporaryRestoration()
+            return !temporaryFull
+        }
+        let previousSession = session
+        session.phase = .restoring
+        session.automaticCompletionNoticePending = session.automaticCompletionNoticePending || automatically
+        do { try temporaryStore.save(session) }
+        catch { banner = "无法保存恢复请求状态，原设置已保留，请稍后重试。"; return false }
+        temporarySession = session
+        let accepted = enabled ? charge.apply(limit: limit) : charge.disable()
+        let restored = accepted && session.confirmsRestoration(charge.readback)
+        if restored {
+            completeTemporaryRestoration()
+        } else if !accepted {
+            temporarySession = previousSession
+            persistTemporarySession(previousSession)
+        }
+        if !restored { banner = !accepted ? charge.message : "恢复请求已提交，等待系统确认；原设置已保留。" }
         return restored
     }
     func restoreSystemManagement() {
+        guard !renderingOnly else { banner = "仅渲染模式不更改系统充电设置。"; return }
         guard !temporaryFull else { banner = "请先结束临时充满并恢复原设置，再切换系统管理。"; return }
         guard monitor.snapshot.hasBattery else { banner = "此 Mac 未检测到内置电池。"; return }
-        if charge.disable(), charge.operationConfirmed {
-            if let limit = charge.currentLimit { settings.limit = Double(limit) }
-            clearTemporaryState()
+        if charge.disable() {
+            chargeActions.submitted(.systemManagement, confirmed: charge.operationConfirmed)
+            if charge.operationConfirmed {
+                if let limit = charge.currentLimit { settings.limit = Double(limit) }
+                clearTemporaryState()
+            }
         }
         banner = charge.message
     }
-    private func clearTemporaryState() {
-        temporaryFull = false; temporaryStarted = nil; temporaryRestoreLimit = nil
-        temporaryAwaitingConfirmation = false; temporaryRestorePending = false
+    @discardableResult
+    private func clearTemporaryState() -> Bool {
+        temporaryFull = false; temporarySession = nil
         lastRestoreAttempt = nil
-        guard !preview else { return }
-        for key in ["temporaryRestoreLimit", "temporaryRestoreEnabled", "temporaryStartedAt", "temporaryAwaitingConfirmation", "temporaryRestorePending"] { UserDefaults.standard.removeObject(forKey: key) }
+        guard !preview && !renderingOnly else { return true }
+        do { try temporaryStore.clear(); return true }
+        catch {
+            banner = "当前状态已确认，但未能清理恢复记录；下次启动会再次核对系统状态。"
+            return false
+        }
+    }
+    private func persistTemporarySession(_ session: TemporaryChargeSession) {
+        do { try temporaryStore.save(session) }
+        catch { banner = "系统请求已提交，原恢复点仍已保留，但未能保存最新进度；请稍后刷新确认。" }
+    }
+    private func completeTemporaryRestoration() {
+        guard let session = temporarySession else { return }
+        var shouldNotify = false
+        if !preview && !renderingOnly {
+            do { shouldNotify = try temporaryStore.completeRestoration(session) }
+            catch {
+                banner = "原充电设置已确认恢复，但未能清理恢复记录；记录已保留，稍后会重试确认。"
+                return
+            }
+        }
+        if let actual = charge.currentLimit { settings.limit = Double(actual) }
+        clearTemporaryState()
+        banner = "原充电设置已恢复。"
+        if shouldNotify { notify(title: "临时充满已完成", text: "已恢复原来的系统充电设置。") }
     }
     func setLogin(_ enabled: Bool) {
         guard !preview else { return }
@@ -513,7 +599,7 @@ final class AppCoordinator: NSObject, ObservableObject, UNUserNotificationCenter
     private func handle(_ snapshot: BatterySnapshot) {
         guard !renderingOnly else { return }
         processTemperatureReminder(snapshot)
-        if temporaryFull || pendingChargeLimit != nil { refreshChargeState() }
+        if temporaryFull || chargeActions.pending != nil { refreshChargeState() }
         if let percentage = snapshot.percentage {
             let limitReached = snapshot.isPluggedIn && percentage >= Int(settings.limit)
             if settings.limitReminder && limitReached && !previousLimitNotice { notify(title: "电量已达到上限", text: "当前电量 \(percentage)%，设定上限 \(Int(settings.limit))%。") }
@@ -521,10 +607,10 @@ final class AppCoordinator: NSObject, ObservableObject, UNUserNotificationCenter
             let low = !snapshot.isPluggedIn && percentage <= Int(settings.lowBatteryThreshold)
             if settings.lowBatteryReminder && low && !previousLowNotice { notify(title: "低电量提醒", text: "电量剩余 \(percentage)%，请连接电源。") }
             previousLowNotice = low
-            if temporaryFull && percentage >= 100, let started = temporaryStarted, Date().timeIntervalSince(started) > 30,
+            if temporaryFull && !temporaryAwaitingConfirmation && temporaryRestoreEnabled != nil && percentage >= 100, let started = temporaryStarted, Date().timeIntervalSince(started) > 30,
                lastRestoreAttempt == nil || Date().timeIntervalSince(lastRestoreAttempt!) > 30 {
                 lastRestoreAttempt = Date()
-                if restoreTemporaryFull() { notify(title: "临时充满已完成", text: "已恢复原来的系统充电设置。") }
+                _ = restoreTemporaryFull(automatically: true)
             }
         }
         if settings.scheduleEnabled {

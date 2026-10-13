@@ -16,45 +16,45 @@ struct DashboardView: View {
             if staticRendering {
                 GeometryReader { geometry in
                     DashboardContent(coordinator: coordinator, compact: true)
-                        .padding(.horizontal, 14).padding(.top, 16).padding(.bottom, 14)
+                        .padding(18)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(width: geometry.size.width, height: geometry.size.height, alignment: .top)
                         .clipped()
                 }
             } else {
                 ScrollView {
-                    DashboardContent(coordinator: coordinator, compact: true)
-                        .padding(.horizontal, 14).padding(.top, 16).padding(.bottom, 14)
-                }.scrollIndicators(.hidden)
+                    DashboardContent(coordinator: coordinator, compact: true).padding(18)
+                }.scrollIndicators(.automatic)
             }
             footer
         }.frame(width: 410)
             .background(AppBackground(settings: settings))
+            .environment(\.interfaceMaterial, settings.material)
             .preferredColorScheme(.dark)
-
     }
     private var footer: some View {
-        HStack(spacing: 9) {
-            BrandText(size: 17)
-            Text("实时电池养护").font(.system(size: 11, weight: .semibold)).foregroundStyle(Palette.text.opacity(0.80))
+        HStack(spacing: 7) {
+            Image(systemName: AppIdentity.brandSymbol).font(.system(size: 12)).foregroundStyle(Palette.green)
+            BrandText(size: 12)
             Spacer()
-            footerButton("arrow.clockwise", label: "刷新电池读数") { monitor.refresh(); coordinator.refreshChargeState() }
-            footerButton("gearshape.fill", label: "打开设置") { coordinator.openSettings() }
+            footerButton("arrow.clockwise", label: monitor.isRefreshing ? "正在刷新电池读数" : "刷新电池读数", enabled: !monitor.isRefreshing) { monitor.refresh(); coordinator.refreshChargeState() }
+            footerButton("gearshape", label: "打开设置") { coordinator.openSettings() }
             footerButton("power", label: "退出 \(AppIdentity.displayName)") { NSApplication.shared.terminate(nil) }
-        }.padding(.horizontal, 14).frame(height: 40)
-            .background(Color.black.opacity(0.16))
+        }.padding(.horizontal, 18).frame(height: 44)
+            .liquidSurface(settings: settings, cornerRadius: 0)
             .overlay(alignment: .top) { Rectangle().fill(Palette.line).frame(height: 1) }
     }
-    private func footerButton(_ symbol: String, label: String, action: @escaping () -> Void) -> some View {
+    private func footerButton(_ symbol: String, label: String, enabled: Bool = true, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: symbol).font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(Palette.text).frame(width: 26, height: 23)
-                .background(Color.white.opacity(0.09), in: RoundedRectangle(cornerRadius: 7))
-        }.buttonStyle(.plain).help(label).accessibilityLabel(label)
+            Image(systemName: symbol).font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Palette.secondary).frame(width: 28, height: 26)
+                .contentShape(RoundedRectangle(cornerRadius: 7))
+        }.buttonStyle(.plain).help(label).accessibilityLabel(label).disabled(!enabled).opacity(enabled ? 1 : 0.4)
     }
 }
 
 struct DashboardContent: View {
+    @Environment(\.staticRendering) private var staticRendering
     @ObservedObject var coordinator: AppCoordinator
     @ObservedObject var settings: AppSettings
     @ObservedObject var monitor: BatteryMonitor
@@ -70,19 +70,34 @@ struct DashboardContent: View {
     }
     private var snapshot: BatterySnapshot { monitor.snapshot }
     var body: some View {
-        VStack(spacing: 10) {
-            statusHeader
-            chargeCard
-            statsPanel
-            powerPanel
-            quickCarePanel
-            appsPanel
-            protectionPanel
-            HStack(spacing: 9) {
-                navigationButton("info.circle", "电池详情") { showBatteryDetails = true }
-                navigationButton("slider.horizontal.3", "充电设置") { coordinator.openSettings(.charging) }
+        VStack(spacing: 16) {
+            if compact {
+                overviewCard
+                statsPanel
+                chargeCard
+                quickCarePanel
+                powerPanel
+                appsPanel
+                protectionPanel
+                detailActions
+            } else {
+                HStack(alignment: .top, spacing: 18) {
+                    VStack(spacing: 16) {
+                        overviewCard
+                        statsPanel
+                        powerPanel
+                        appsPanel
+                    }.frame(maxWidth: .infinity)
+                    VStack(spacing: 16) {
+                        chargeCard
+                        quickCarePanel
+                        protectionPanel
+                        detailActions
+                    }.frame(maxWidth: .infinity)
+                }
             }
-        }.frame(maxWidth: compact ? 382 : 700)
+        }.frame(maxWidth: compact ? 374 : 840, alignment: .top)
+            .environment(\.interfaceMaterial, settings.material)
             .sheet(isPresented: $showBatteryDetails) { BatteryDetailsView(coordinator: coordinator) }
             .sheet(isPresented: $showControlInfo) { ControlInfoView(coordinator: coordinator) }
             .onChange(of: settings.limit) { chargeDraft = $0 }
@@ -92,120 +107,137 @@ struct DashboardContent: View {
                 if compact { showBatteryDetails = false; showControlInfo = false }
             }
     }
-    private var statusHeader: some View {
-        VStack(spacing: 13) {
-            HStack(alignment: .center, spacing: 10) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(snapshot.hasBattery ? (snapshot.isPluggedIn ? "电源已连接" : "电池供电中") : "未检测到电池")
-                        .font(.system(size: 21, weight: .heavy)).foregroundStyle(Palette.text)
-                    Text(snapshot.statusText).font(.system(size: 12, weight: .semibold)).foregroundStyle(Palette.text.opacity(0.8))
-                }
-                Spacer(minLength: 4)
+    private var overviewCard: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text("当前电量").font(.system(size: 12, weight: .medium)).foregroundStyle(Palette.secondary)
+                Spacer()
                 HStack(spacing: 5) {
-                    Image(systemName: "thermometer.medium").font(.system(size: 14))
-                    Text(snapshot.temperature.map { String(format: "%.1f°C", $0) } ?? "—°C")
-                        .font(.system(size: 13, weight: .bold)).monospacedDigit()
-                }.foregroundStyle(Palette.green).help(snapshot.temperature != nil ? "电池实时温度" : "系统未提供有效温度时显示 —")
-                Rectangle().fill(Color.white.opacity(0.16)).frame(width: 1, height: 25)
-                Text(snapshot.percentage.map { "\($0)%" } ?? "—%")
-                    .font(.system(size: 29, weight: .heavy)).monospacedDigit().foregroundStyle(Palette.text)
+                    Image(systemName: snapshot.isPluggedIn ? "powerplug" : "battery.75percent")
+                    Text(snapshot.hasBattery ? (snapshot.isPluggedIn ? "外接电源" : "电池供电") : "无电池")
+                }.font(.system(size: 10, weight: .medium)).foregroundStyle(Palette.secondary)
+                    .padding(.horizontal, 9).padding(.vertical, 5)
+                    .liquidSurface(settings: settings, cornerRadius: 100)
             }
+            HStack(alignment: .center, spacing: 16) {
+                HStack(alignment: .firstTextBaseline, spacing: 2) {
+                    Text(snapshot.percentage.map(String.init) ?? "—")
+                        .font(.system(size: 54, weight: .medium, design: .rounded)).monospacedDigit()
+                    Text("%").font(.system(size: 24, weight: .regular)).foregroundStyle(Palette.secondary)
+                }.foregroundStyle(Palette.text)
+                Spacer(minLength: 4)
+                BatteryGauge(percentage: snapshot.percentage, charging: snapshot.isCharging)
+                    .frame(width: 94, height: 48)
+            }
+            HStack(spacing: 6) {
+                Circle().fill(snapshot.hasBattery ? Palette.green : Palette.orange).frame(width: 5, height: 5)
+                Text(snapshot.statusText).font(.system(size: 12, weight: .medium)).foregroundStyle(Palette.text)
+                Spacer(minLength: 4)
+                Image(systemName: "thermometer.medium").font(.system(size: 11))
+                Text(snapshot.temperature.map { String(format: "%.1f°C", $0) } ?? "—°C")
+                    .font(.system(size: 11, weight: .medium)).monospacedDigit()
+            }.foregroundStyle(Palette.secondary)
+                .help(snapshot.temperature == nil ? "系统未提供有效温度读数" : "电池实时温度")
             Rectangle().fill(Palette.line).frame(height: 1)
-        }.padding(.bottom, 1)
+            updateLine
+        }.padding(20)
+            .liquidSurface(settings: settings, cornerRadius: 18, prominence: true)
+    }
+    @ViewBuilder private var updateLine: some View {
+        if staticRendering { updateStamp(at: Date()) }
+        else {
+            TimelineView(.periodic(from: Date(), by: 5)) { context in updateStamp(at: context.date) }
+        }
+    }
+    private func updateStamp(at date: Date) -> some View {
+        let stale = date.timeIntervalSince(snapshot.updatedAt) > 120
+        return HStack(spacing: 5) {
+            Image(systemName: monitor.isRefreshing ? "arrow.clockwise" : (stale ? "clock.badge.exclamationmark" : "clock"))
+            Text(monitor.isRefreshing ? "正在更新…" : (stale ? "读数待更新" : "更新于 \(snapshot.updatedAt.formatted(date: .omitted, time: .shortened))"))
+            Spacer()
+            Text("自动更新")
+        }.font(.system(size: 10)).foregroundStyle(stale ? Palette.orange : Palette.tertiary)
+            .accessibilityElement(children: .combine)
     }
     private var chargeCard: some View {
-        VStack(spacing: 14) {
-            HStack(spacing: 12) {
-                Image(systemName: snapshot.isPluggedIn ? "powerplug.fill" : "battery.100percent")
-                    .font(.system(size: 23, weight: .bold)).foregroundStyle(.white)
-                    .frame(width: 39, height: 39)
-                    .background(Palette.green.opacity(0.17), in: RoundedRectangle(cornerRadius: 12))
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(coordinator.chargeStatus).font(.system(size: 16, weight: .bold)).foregroundStyle(Palette.text)
-                    Text(adapterText).font(.system(size: 12, weight: .semibold)).foregroundStyle(Palette.secondary)
+        Panel {
+            VStack(alignment: .leading, spacing: 15) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("充电上限").font(.system(size: 13, weight: .semibold)).foregroundStyle(Palette.text)
+                    Spacer()
+                    Text("\(coordinator.temporaryFull ? 100 : Int(chargeDraft))%")
+                        .font(.system(size: 26, weight: .medium, design: .rounded)).monospacedDigit()
+                        .foregroundStyle(coordinator.temporaryFull ? Palette.orange : Palette.green)
                 }
-                Spacer()
-            }
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(snapshot.percentage.map { "\($0)%" } ?? "—%")
-                    .font(.system(size: 24, weight: .heavy)).foregroundStyle(Palette.green).monospacedDigit()
-                Text("实时电量").font(.system(size: 11, weight: .semibold)).foregroundStyle(Palette.secondary)
-                Spacer()
-                Text("选择上限").font(.system(size: 11, weight: .semibold)).foregroundStyle(Palette.secondary)
-                Text("\(coordinator.temporaryFull ? 100 : Int(chargeDraft))%").font(.system(size: 22, weight: .heavy)).foregroundStyle(Palette.green).monospacedDigit()
-            }
-            ChargeLimitControl(value: Binding(get: { coordinator.temporaryFull ? 100 : chargeDraft },
-                                              set: { if !coordinator.temporaryFull { chargeDraft = $0 } }),
-                               limits: charge.availableLimits, isEnabled: coordinator.canAdjustChargeLimit) { limit in
-                coordinator.applySelectedLimit(limit)
-                if charge.hasKnownState, let actual = charge.currentLimit { chargeDraft = Double(actual) }
-            }
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(spacing: 6) {
-                    Circle().fill(charge.hasKnownState ? Palette.green : Palette.orange).frame(width: 6, height: 6)
-                    Text("系统当前：\(coordinator.systemChargeLimitText)")
-                        .font(.system(size: 11, weight: .semibold)).foregroundStyle(Palette.text)
+                ChargeLimitControl(value: Binding(get: { coordinator.temporaryFull ? 100 : chargeDraft },
+                                                  set: { if !coordinator.temporaryFull { chargeDraft = $0 } }),
+                                   limits: charge.availableLimits, isEnabled: coordinator.canAdjustChargeLimit) { limit in
+                    coordinator.applySelectedLimit(limit)
+                    if charge.hasKnownState, let actual = charge.currentLimit { chargeDraft = Double(actual) }
                 }
-                if coordinator.temporaryFull {
-                    Text(coordinator.capCaption)
-                } else if let message = charge.message {
-                    Text(message)
-                }
-                if !snapshot.isPluggedIn { Text("接通电源后按系统上限管理充电") }
+                Rectangle().fill(Palette.line).frame(height: 1)
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 5) {
+                        Circle().fill(charge.hasKnownState ? Palette.green : Palette.orange).frame(width: 4, height: 4)
+                        Text("系统当前：\(coordinator.systemChargeLimitText)")
+                            .font(.system(size: 10, weight: .medium)).foregroundStyle(Palette.secondary)
+                    }
+                    if coordinator.temporaryFull { Text(coordinator.capCaption) }
+                    else if let message = charge.message { Text(message) }
+                    if !snapshot.isPluggedIn { Text("接通电源后按此上限管理充电") }
+                }.font(.system(size: 10)).foregroundStyle(Palette.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .font(.system(size: 10)).foregroundStyle(Palette.secondary)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }.padding(14)
-            .background(LinearGradient(colors: [Color(red: 0.10, green: 0.13, blue: 0.16), Color(red: 0.075, green: 0.085, blue: 0.09)], startPoint: .leading, endPoint: .trailing), in: RoundedRectangle(cornerRadius: 16))
-            .overlay(RoundedRectangle(cornerRadius: 16).stroke(LinearGradient(colors: [.white.opacity(0.13), Palette.green.opacity(0.22)], startPoint: .leading, endPoint: .trailing), lineWidth: 1))
-    }
-    private var adapterText: String {
-        guard snapshot.isPluggedIn else { return "适配器未连接" }
-        if let volts = snapshot.adapterVoltage, let amps = snapshot.adapterAmperage { return String(format: "适配器 %.2fV @ %.2fA", volts, amps) }
-        return "已连接电源适配器"
+        }
     }
     private var statsPanel: some View {
         Panel {
             HStack(spacing: 0) {
-                statistic(snapshot.health.map { "\($0)%" } ?? "—", label: "电池健康", color: Palette.green)
+                statistic(snapshot.health.map { "\($0)%" } ?? "—", label: "电池健康")
                     .help("按最大容量与设计容量估算")
-                Rectangle().fill(Palette.line).frame(width: 1, height: 35)
-                statistic(snapshot.cycles.map { "\($0)" } ?? "—", label: "循环次数", color: Palette.purple)
-                Rectangle().fill(Palette.line).frame(width: 1, height: 35)
-                statistic(remainingText, label: "剩余时间", color: Palette.orange, small: true)
+                Rectangle().fill(Palette.line).frame(width: 1, height: 30)
+                statistic(snapshot.cycles.map(String.init) ?? "—", label: "循环次数")
+                Rectangle().fill(Palette.line).frame(width: 1, height: 30)
+                statistic(remainingText, label: snapshot.isCharging ? "充满预计" : (snapshot.isPluggedIn ? "充电状态" : "续航预计"), small: true)
             }
         }
     }
     private var remainingText: String {
+        guard snapshot.hasBattery else { return "—" }
         if snapshot.isPluggedIn && !snapshot.isCharging { return "未在充电" }
         guard let minutes = snapshot.timeRemainingMinutes, minutes > 0 else { return "正在估算" }
         return minutes >= 60 ? "\(minutes / 60)小时\(minutes % 60)分" : "\(minutes)分钟"
     }
-    private func statistic(_ value: String, label: String, color: Color, small: Bool = false) -> some View {
-        VStack(spacing: 3) {
-            Text(value).font(.system(size: small ? 13 : 18, weight: .bold)).foregroundStyle(color).monospacedDigit()
-            Text(label).font(.system(size: 10, weight: .semibold)).foregroundStyle(Palette.text.opacity(0.84))
+    private func statistic(_ value: String, label: String, small: Bool = false) -> some View {
+        VStack(spacing: 6) {
+            Text(value).font(.system(size: small ? 12 : 20, weight: .medium, design: .rounded)).foregroundStyle(Palette.text).monospacedDigit()
+            Text(label).font(.system(size: 10)).foregroundStyle(Palette.tertiary)
         }.frame(maxWidth: .infinity)
     }
     private var powerPanel: some View {
         Panel {
-            VStack(spacing: 12) {
-                panelTitle("point.3.connected.trianglepath.dotted", "实时功率分流", detail: !snapshot.hasBattery ? "未检测到电池" : (snapshot.isPluggedIn ? "电源适配器" : "电池供电"))
+            VStack(spacing: 15) {
+                panelTitle("实时功率", detail: !snapshot.hasBattery ? "暂无读数" : (snapshot.isPluggedIn ? "外接电源" : "电池供电"))
                 PowerFlowDiagram(snapshot: snapshot).frame(height: 174)
             }
         }
     }
     private var appsPanel: some View {
         Panel {
-            VStack(spacing: 12) {
-                panelTitle("waveform.path.ecg", "当前耗电 App", detail: "CPU 使用率参考")
-                if monitor.apps.isEmpty {
-                    Text("正在读取应用活动…").font(.system(size: 12)).foregroundStyle(Palette.secondary).frame(maxWidth: .infinity, minHeight: 65)
+            VStack(spacing: 14) {
+                panelTitle("应用活动", detail: "CPU 使用率")
+                    .help("按应用进程的 CPU 使用率排序，仅作活动参考，不代表实际耗电份额")
+                if let message = monitor.appActivityMessage {
+                    Text(message).font(.system(size: 11)).foregroundStyle(Palette.secondary).frame(maxWidth: .infinity, minHeight: 64)
                 } else {
                     ForEach(Array(monitor.apps.prefix(3).enumerated()), id: \.element.id) { index, app in
                         AppUsageRow(app: app, rank: index + 1, maxCPU: max(1, monitor.apps.map(\.cpuPercent).max() ?? 1))
                     }
+                }
+                if let updatedAt = monitor.appsUpdatedAt {
+                    Text("更新于 \(updatedAt.formatted(date: .omitted, time: .shortened))")
+                        .font(.system(size: 9)).foregroundStyle(Palette.tertiary)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
                 }
             }
         }
@@ -221,35 +253,68 @@ struct DashboardContent: View {
                       onSystemSettings: coordinator.openSystemBattery,
                       onDismissFeedback: { coordinator.banner = nil })
     }
-    private var protectionPanel: some View {
-        TimelineView(.periodic(from: Date(), by: 5)) { context in
-            ProtectionCard(state: coordinator.protectionState.at(context.date),
-                           reminderEnabled: Binding(get: { settings.highTemperatureReminder },
-                                                    set: { coordinator.setHighTemperatureReminder($0) }),
-                           onReminderSettings: { coordinator.openSettings(.automation) },
-                           onChargeSettings: { coordinator.openSettings(.charging) },
-                           onNotificationSettings: coordinator.openSystemNotifications)
+    @ViewBuilder private var protectionPanel: some View {
+        if staticRendering { protectionCard(at: Date()) }
+        else { TimelineView(.periodic(from: Date(), by: 5)) { context in protectionCard(at: context.date) } }
+    }
+    private func protectionCard(at date: Date) -> some View {
+        ProtectionCard(state: coordinator.protectionState.at(date),
+                       reminderEnabled: Binding(get: { settings.highTemperatureReminder },
+                                                set: { coordinator.setHighTemperatureReminder($0) }),
+                       onReminderSettings: { coordinator.openSettings(.automation) },
+                       onChargeSettings: { coordinator.openSettings(.charging) },
+                       onNotificationSettings: coordinator.openSystemNotifications)
+    }
+    private func panelTitle(_ title: String, detail: String) -> some View {
+        HStack {
+            Text(title).font(.system(size: 13, weight: .semibold)).foregroundStyle(Palette.text)
+            Spacer()
+            Text(detail).font(.system(size: 10)).foregroundStyle(Palette.tertiary)
         }
     }
-    private func panelTitle(_ symbol: String, _ title: String, detail: String, detailColor: Color = Palette.secondary) -> some View {
-        HStack(spacing: 9) {
-            Image(systemName: symbol).font(.system(size: 14, weight: .bold)).foregroundStyle(Palette.text)
-            Text(title).font(.system(size: 14, weight: .bold)).foregroundStyle(Palette.text)
-            Spacer(minLength: 4)
-            Text(detail).font(.system(size: 10, weight: .semibold)).foregroundStyle(detailColor)
+    private var detailActions: some View {
+        HStack(spacing: 10) {
+            navigationButton("info.circle", "电池详情") { showBatteryDetails = true }
+            navigationButton("slider.horizontal.3", "充电设置") { coordinator.openSettings(.charging) }
         }
     }
     private func navigationButton(_ symbol: String, _ title: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            HStack(spacing: 9) {
-                Image(systemName: symbol)
+            HStack(spacing: 7) {
+                Image(systemName: symbol).foregroundStyle(Palette.tertiary)
                 Text(title)
-                Spacer()
-                Image(systemName: "chevron.right").font(.system(size: 13, weight: .semibold))
-            }.font(.system(size: 12, weight: .bold)).foregroundStyle(Palette.text).padding(.horizontal, 12).frame(height: 35)
-                .background(Color.white.opacity(0.025), in: RoundedRectangle(cornerRadius: 14))
-                .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.white.opacity(0.14), lineWidth: 1))
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right").font(.system(size: 9))
+            }.font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.secondary)
+                .padding(.horizontal, 13).frame(height: 39)
+                .liquidSurface(settings: settings, cornerRadius: 10)
         }.buttonStyle(.plain)
+    }
+}
+
+private struct BatteryGauge: View {
+    let percentage: Int?
+    let charging: Bool
+    var body: some View {
+        GeometryReader { geometry in
+            let bodyWidth = geometry.size.width - 7
+            let fraction = CGFloat(min(100, max(0, percentage ?? 0))) / 100
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 9).stroke(Palette.green.opacity(0.38), lineWidth: 2)
+                    .frame(width: bodyWidth)
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(LinearGradient(colors: [Palette.green.opacity(0.7), Palette.green], startPoint: .leading, endPoint: .trailing))
+                    .frame(width: max(0, (bodyWidth - 10) * fraction), height: geometry.size.height - 10)
+                    .padding(.leading, 5)
+                RoundedRectangle(cornerRadius: 2).fill(Palette.green.opacity(0.5))
+                    .frame(width: 4, height: 17).offset(x: bodyWidth + 3)
+                if charging {
+                    Image(systemName: "bolt.fill").font(.system(size: 24, weight: .semibold))
+                        .foregroundStyle(fraction > 0.5 ? Palette.surface : Palette.green)
+                        .frame(width: bodyWidth, height: geometry.size.height)
+                }
+            }.frame(height: geometry.size.height)
+        }.accessibilityHidden(true)
     }
 }
 
@@ -257,24 +322,22 @@ struct AppUsageRow: View {
     let app: AppUsage
     let rank: Int
     let maxCPU: Double
-    private var color: Color { [Palette.orange, Palette.blue, Palette.purple][min(2, rank - 1)] }
     var body: some View {
         HStack(spacing: 10) {
             Group {
                 if let icon = app.icon { Image(nsImage: icon).resizable() }
-                else { Image(systemName: "app.fill").resizable().foregroundStyle(Palette.text) }
-            }.frame(width: 24, height: 24)
-            VStack(spacing: 5) {
-                HStack(spacing: 10) {
-                    Text("\(rank)").font(.system(size: 10, weight: .bold)).foregroundStyle(color)
-                    Text(app.name).font(.system(size: 12, weight: .bold)).foregroundStyle(Palette.text).lineLimit(1)
+                else { Image(systemName: "app.fill").resizable().foregroundStyle(Palette.secondary) }
+            }.frame(width: 26, height: 26).clipShape(RoundedRectangle(cornerRadius: 6))
+            VStack(spacing: 6) {
+                HStack(spacing: 8) {
+                    Text(app.name).font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.text).lineLimit(1)
                     Spacer(minLength: 4)
-                    Text(String(format: "%.1f%%", app.cpuPercent)).font(.system(size: 11, weight: .bold)).foregroundStyle(Palette.text.opacity(0.8)).monospacedDigit()
+                    Text(String(format: "%.1f%%", app.cpuPercent)).font(.system(size: 10)).foregroundStyle(Palette.secondary).monospacedDigit()
                 }
                 GeometryReader { geometry in
                     ZStack(alignment: .leading) {
-                        Capsule().fill(Color.white.opacity(0.1))
-                        Capsule().fill(color).frame(width: max(2, geometry.size.width * min(1, app.cpuPercent / maxCPU)))
+                        Capsule().fill(Palette.surfaceRaised)
+                        Capsule().fill(Palette.green.opacity(0.75)).frame(width: max(0, geometry.size.width * min(1, app.cpuPercent / maxCPU)))
                     }
                 }.frame(height: 3)
             }
@@ -294,13 +357,11 @@ struct ChargeSlider: View {
             let selected = min(range.upperBound, max(range.lowerBound, value))
             let offset = CGFloat((selected - range.lowerBound) / (range.upperBound - range.lowerBound)) * max(0, width - 16)
             ZStack(alignment: .leading) {
-                Capsule().fill(Palette.gradient).frame(height: 10).shadow(color: Palette.green.opacity(0.25), radius: 8)
-                HStack(spacing: 0) {
-                    ForEach(0..<11) { _ in Spacer(); Rectangle().fill(.white.opacity(0.25)).frame(width: 1, height: 5) }
-                    Spacer()
-                }
-                Capsule().fill(.white.opacity(0.75)).frame(width: 3, height: 20).offset(x: offset + 6.5)
-                Circle().fill(Color.white).frame(width: 13, height: 13).overlay(Circle().stroke(Palette.green.opacity(0.65), lineWidth: 2.5)).offset(x: offset + 1.5)
+                Capsule().fill(Palette.surfaceRaised).frame(height: 5)
+                Capsule().fill(Palette.green.opacity(0.9)).frame(width: offset + 8, height: 5)
+                Circle().fill(Palette.text).frame(width: 14, height: 14)
+                    .overlay(Circle().stroke(Palette.green.opacity(0.4), lineWidth: 1))
+                    .shadow(color: .black.opacity(0.18), radius: 2, y: 1).offset(x: offset + 1)
             }.frame(height: 20).contentShape(Rectangle())
                 .gesture(DragGesture(minimumDistance: 0).onChanged { gesture in
                     let percent = range.lowerBound + min(1, max(0, (gesture.location.x - 8) / max(1, width - 16))) * (range.upperBound - range.lowerBound)
@@ -345,7 +406,9 @@ struct BatteryDetailsView: View {
             detail("更新时间", snapshot.updatedAt.formatted(date: .omitted, time: .standard))
             Text("电池健康由容量数据估算。功率字段取决于机型；系统未提供的读数显示为空。")
                 .font(.system(size: 11)).foregroundStyle(Palette.secondary)
-        }.padding(24).frame(width: 420).foregroundStyle(Palette.text).background(Color(red: 0.19, green: 0.19, blue: 0.19)).preferredColorScheme(.dark)
+        }.padding(24).frame(width: 420).foregroundStyle(Palette.text)
+            .liquidSurface(settings: coordinator.settings, cornerRadius: 0)
+            .preferredColorScheme(.dark)
     }
     private func detail(_ title: String, _ value: String) -> some View {
         HStack { Text(title).foregroundStyle(Palette.secondary); Spacer(); Text(value).monospacedDigit() }.font(.system(size: 12))
@@ -368,6 +431,8 @@ struct ControlInfoView: View {
                 Spacer()
                 SmallButton(title: "完成") { dismiss() }.keyboardShortcut(.cancelAction)
             }
-        }.padding(24).frame(width: 380).foregroundStyle(Palette.text).background(Color(red: 0.19, green: 0.19, blue: 0.19)).preferredColorScheme(.dark)
+        }.padding(24).frame(width: 380).foregroundStyle(Palette.text)
+            .liquidSurface(settings: coordinator.settings, cornerRadius: 0)
+            .preferredColorScheme(.dark)
     }
 }

@@ -41,7 +41,7 @@ struct ChargeLimitControl: View {
                 .font(.system(size: 12, weight: .bold))
                 .foregroundStyle(Palette.green)
                 .frame(width: 29, height: 29)
-                .background(Color(red: 0.15, green: 0.18, blue: 0.19), in: RoundedRectangle(cornerRadius: 7))
+                .background(Palette.surfaceRaised, in: RoundedRectangle(cornerRadius: 8))
         }
         .buttonStyle(ChargeAdjustmentButtonStyle())
         .opacity(isEnabled ? 1 : 0.45)
