@@ -292,26 +292,37 @@ struct DashboardContent: View {
     }
 }
 
-private struct BatteryGauge: View {
+struct BatteryGauge: View {
     let percentage: Int?
     let charging: Bool
     var body: some View {
         GeometryReader { geometry in
             let bodyWidth = geometry.size.width - 7
             let fraction = CGFloat(min(100, max(0, percentage ?? 0))) / 100
+            let levelColor = BatteryLevelPalette.color(for: percentage)
+            let filledWidth = max(0, (bodyWidth - 10) * fraction)
             ZStack(alignment: .leading) {
-                RoundedRectangle(cornerRadius: 9).stroke(Palette.green.opacity(0.38), lineWidth: 2)
+                RoundedRectangle(cornerRadius: 9).stroke(levelColor.opacity(0.38), lineWidth: 2)
                     .frame(width: bodyWidth)
                 RoundedRectangle(cornerRadius: 5)
-                    .fill(LinearGradient(colors: [Palette.green.opacity(0.7), Palette.green], startPoint: .leading, endPoint: .trailing))
-                    .frame(width: max(0, (bodyWidth - 10) * fraction), height: geometry.size.height - 10)
+                    .fill(levelColor)
+                    .frame(width: filledWidth, height: geometry.size.height - 10)
                     .padding(.leading, 5)
-                RoundedRectangle(cornerRadius: 2).fill(Palette.green.opacity(0.5))
+                RoundedRectangle(cornerRadius: 2).fill(levelColor.opacity(0.5))
                     .frame(width: 4, height: 17).offset(x: bodyWidth + 3)
                 if charging {
-                    Image(systemName: "bolt.fill").font(.system(size: 24, weight: .semibold))
-                        .foregroundStyle(fraction > 0.5 ? Palette.surface : Palette.green)
+                    let bolt = Image(systemName: "bolt.fill").font(.system(size: 24, weight: .semibold))
+                    bolt.foregroundStyle(levelColor)
                         .frame(width: bodyWidth, height: geometry.size.height)
+                        .overlay {
+                            bolt.foregroundStyle(Color.black.opacity(0.8))
+                                .frame(width: bodyWidth, height: geometry.size.height)
+                                .mask(alignment: .leading) {
+                                    RoundedRectangle(cornerRadius: 5)
+                                        .frame(width: filledWidth, height: geometry.size.height - 10)
+                                        .padding(.leading, 5)
+                                }
+                        }
                 }
             }.frame(height: geometry.size.height)
         }.accessibilityHidden(true)

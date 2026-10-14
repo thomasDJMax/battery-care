@@ -8,7 +8,7 @@ enum StatusReadout {
     /// Unknown capacity keeps an empty outline instead of suggesting a full
     /// battery. A template image lets the menu bar choose contrasting ink.
     static func batteryImage(percentage: Int?, powerConnected: Bool, useColors: Bool) -> NSImage {
-        let color = useColors ? batteryGreen : NSColor.black
+        let color = useColors ? BatteryLevelPalette.nsColor(for: percentage) : NSColor.black
         let image = NSImage(size: batterySize)
         image.lockFocus()
         color.setStroke()
@@ -17,9 +17,9 @@ enum StatusReadout {
         body.stroke()
         color.setFill()
         NSBezierPath(roundedRect: NSRect(x: 22, y: 5, width: 1.6, height: 6), xRadius: 0.7, yRadius: 0.7).fill()
+        let filledWidth = 16.2 * CGFloat(min(100, max(0, percentage ?? 0))) / 100
         if let percentage, percentage > 0 {
-            let width = 16.2 * CGFloat(min(100, percentage)) / 100
-            NSBezierPath(roundedRect: NSRect(x: 2.8, y: 4, width: width, height: 8), xRadius: min(1, width / 2), yRadius: 1).fill()
+            NSBezierPath(roundedRect: NSRect(x: 2.8, y: 4, width: filledWidth, height: 8), xRadius: min(1, filledWidth / 2), yRadius: 1).fill()
         }
         if powerConnected {
             let bolt = NSBezierPath()
@@ -31,8 +31,17 @@ enum StatusReadout {
             bolt.line(to: NSPoint(x: 12.6, y: 9.2))
             bolt.close()
             if useColors {
-                NSColor.white.setFill()
+                color.setFill()
                 bolt.fill()
+                if filledWidth > 0 {
+                    // Dark ink stays visible on pale-yellow and yellow fill;
+                    // the unfilled part retains the capacity color.
+                    NSGraphicsContext.saveGraphicsState()
+                    NSBezierPath(roundedRect: NSRect(x: 2.8, y: 4, width: filledWidth, height: 8), xRadius: min(1, filledWidth / 2), yRadius: 1).addClip()
+                    NSColor.black.withAlphaComponent(0.8).setFill()
+                    bolt.fill()
+                    NSGraphicsContext.restoreGraphicsState()
+                }
             } else {
                 // Opaque white would become menu-bar ink in a template, too.
                 // Knock out the bolt and retain its outer outline.

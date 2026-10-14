@@ -187,7 +187,7 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 11) {
                     SegmentedChoice(choices: [(.battery, "实时电量"), (.power, "实时功率"), (.both, "电量与功率")], selection: $settings.readout)
                     separator
-                    SettingRow(symbol: "paintpalette.fill", color: Palette.green, title: "绿色电池图标", subtitle: "图标填充反映实际电量；充电时读数也显示绿色", isOn: $settings.useColors)
+                    SettingRow(symbol: "paintpalette.fill", color: Palette.green, title: "按电量显示颜色", subtitle: "仅影响菜单栏：0–24% 红色、25–49% 淡黄色、50–74% 黄色、75–100% 绿色；关闭后恢复系统菜单栏颜色，仪表盘保持彩色。", isOn: $settings.useColors)
                 }
             }
         }

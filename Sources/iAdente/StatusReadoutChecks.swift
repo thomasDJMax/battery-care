@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 
 @MainActor
 func runStatusReadoutChecks() {
@@ -22,24 +23,28 @@ func runStatusReadoutChecks() {
     precondition(!quarter.isTemplate)
     precondition(StatusReadout.batteryImage(percentage: 25, powerConnected: true, useColors: false).isTemplate)
     precondition(!StatusReadout.chargingImage(text: "25% · 12.0W", percentage: 25).isTemplate)
-    print("Status icon checks passed: actual capacity, unknown/invalid bounds, green and native contrast.")
+    print("Status icon checks passed: actual capacity, unknown/invalid bounds, capacity colors and native contrast.")
 }
 
 @MainActor
 func renderStatusReadoutViews(to directory: String) throws {
     try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
-    let image = NSImage(size: NSSize(width: 560, height: 220))
+    let image = NSImage(size: NSSize(width: 830, height: 280))
     image.lockFocus()
     NSColor(calibratedWhite: 0.12, alpha: 1).setFill()
-    NSRect(x: 0, y: 0, width: 560, height: 220).fill()
-    let percentages: [Int?] = [nil, 0, 25, 50, 75, 100]
+    NSRect(x: 0, y: 0, width: 830, height: 280).fill()
+    let percentages: [Int?] = [nil, 0, 24, 25, 49, 50, 74, 75, 100]
     for (index, percentage) in percentages.enumerated() {
         let x = CGFloat(index) * 90 + 10
         let label = percentage.map { "\($0)%" } ?? "未知"
-        (label as NSString).draw(at: NSPoint(x: x, y: 180), withAttributes: [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.white])
+        (label as NSString).draw(at: NSPoint(x: x, y: 250), withAttributes: [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.white])
         StatusReadout.batteryImage(percentage: percentage, powerConnected: false, useColors: true)
-            .draw(in: NSRect(x: x, y: 125, width: 72, height: 48))
+            .draw(in: NSRect(x: x, y: 195, width: 72, height: 48))
         StatusReadout.batteryImage(percentage: percentage, powerConnected: true, useColors: true)
+            .draw(in: NSRect(x: x, y: 135, width: 72, height: 48))
+        NSColor(calibratedWhite: 0.92, alpha: 1).setFill()
+        NSRect(x: x, y: 65, width: 72, height: 48).fill()
+        StatusReadout.batteryImage(percentage: percentage, powerConnected: false, useColors: true)
             .draw(in: NSRect(x: x, y: 65, width: 72, height: 48))
         // Draw the template's alpha on a light row to check its bolt knockout.
         NSColor(calibratedWhite: 0.92, alpha: 1).setFill()
@@ -52,5 +57,22 @@ func renderStatusReadoutViews(to directory: String) throws {
           let bitmap = NSBitmapImageRep(data: data),
           let png = bitmap.representation(using: .png, properties: [:]) else { throw NSError(domain: "BatteryCare.StatusRender", code: 1) }
     try png.write(to: URL(fileURLWithPath: directory).appendingPathComponent("status-capacity-matrix.png"))
-    print("Rendered status icons: unknown, 0, 25, 50, 75 and 100 percent, with color and template contrast.")
+    let dashboard = HStack(spacing: 18) {
+        ForEach(Array(percentages.enumerated()), id: \.offset) { sample in
+            VStack(spacing: 18) {
+                Text(sample.element.map { "\($0)%" } ?? "未知")
+                    .font(.system(size: 13)).foregroundStyle(Palette.text)
+                BatteryGauge(percentage: sample.element, charging: false).frame(width: 94, height: 48)
+                BatteryGauge(percentage: sample.element, charging: true).frame(width: 94, height: 48)
+            }
+        }
+    }.padding(20).background(Palette.background).environment(\.colorScheme, .dark)
+    let renderer = ImageRenderer(content: dashboard)
+    renderer.scale = 2
+    guard let cgImage = renderer.cgImage,
+          let dashboardPNG = NSBitmapImageRep(cgImage: cgImage).representation(using: .png, properties: [:]) else {
+        throw NSError(domain: "BatteryCare.StatusRender", code: 2)
+    }
+    try dashboardPNG.write(to: URL(fileURLWithPath: directory).appendingPathComponent("battery-level-dashboard.png"))
+    print("Rendered capacity-color boundaries: unknown, 0, 24, 25, 49, 50, 74, 75 and 100 percent, with light/dark and template contrast.")
 }
