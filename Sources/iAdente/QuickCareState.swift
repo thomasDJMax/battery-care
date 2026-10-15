@@ -11,11 +11,13 @@ struct QuickCareState {
     let temporaryFull: Bool
     let restoreDescription: String
     var pendingTemporaryStatus: String? = nil
+    var hasLegacyRecovery = false
 
     var hasBattery: Bool { snapshot.hasBattery }
     var canApplyPreset: Bool { hasBattery && isSupported && !temporaryFull }
     var canRestoreSystem: Bool { canApplyPreset && (isEnabled || !hasKnownState) }
-    var canToggleTemporary: Bool { temporaryFull || temporaryBlockReason == nil }
+    var canToggleTemporary: Bool { !hasLegacyRecovery && (temporaryFull || temporaryBlockReason == nil) }
+    var canAcknowledgeLegacyRecovery: Bool { temporaryFull && hasLegacyRecovery && hasKnownState }
     func isPresetActive(_ limit: Int) -> Bool {
         !temporaryFull && hasKnownState && isEnabled && currentLimit == limit
     }
@@ -29,12 +31,14 @@ struct QuickCareState {
         return "系统默认"
     }
     var presetCaption: String {
+        if temporaryFull && hasLegacyRecovery { return "确认系统设置并结束旧记录后可调整" }
         if temporaryFull { return "先恢复原设置，再调整上限" }
         if !hasBattery { return "未检测到内置电池" }
         if !isSupported { return "请在系统设置中管理充电" }
         return snapshot.isPluggedIn ? "点击后应用到系统" : "点击应用，下次接通电源时生效"
     }
     var temporaryButtonTitle: String {
+        if temporaryFull && hasLegacyRecovery { return "需手动确认" }
         if temporaryFull { return hasKnownState ? "恢复原设置" : "重试恢复" }
         if !hasBattery || !isSupported { return "不可用" }
         if snapshot.percentage == 100 { return "已充满" }
@@ -43,6 +47,7 @@ struct QuickCareState {
         return "开始"
     }
     var temporarySubtitle: String {
+        if temporaryFull && hasLegacyRecovery { return "旧记录缺少原管理方式，请先在系统电池设置中确认。" }
         if temporaryFull, pendingTemporaryStatus != nil { return "请求待确认，原设置已保留" }
         if temporaryFull {
             return hasKnownState ? "充满后自动恢复\(restoreDescription)" : "状态待确认，原设置已保留"

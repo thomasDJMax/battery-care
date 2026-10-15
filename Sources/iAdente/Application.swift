@@ -51,8 +51,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     @objc private func willSleep() { coordinator.monitor.setSuspended(true); dashboardPanel.close() }
-    @objc private func didWake() { coordinator.monitor.setSuspended(false); coordinator.refreshChargeState() }
-    func applicationDidBecomeActive(_ notification: Notification) { coordinator?.updateNotificationStatus() }
+    @objc private func didWake() {
+        coordinator.monitor.setSuspended(false)
+        coordinator.refreshChargeState()
+        coordinator.updateNotificationStatus()
+    }
+    func applicationDidBecomeActive(_ notification: Notification) {
+        coordinator?.refreshLoginStatus()
+        coordinator?.updateNotificationStatus()
+    }
 
     @objc private func togglePopover(_ sender: Any?) {
         if NSApp.currentEvent?.type == .rightMouseUp {
@@ -144,6 +151,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     private func showSettings() {
+        coordinator.refreshLoginStatus()
         dashboardPanel?.close()
         if settingsWindow == nil {
             // Extend the material beneath the transparent native titlebar.
@@ -247,7 +255,10 @@ struct BatteryCareApplication {
         runDashboardPresentationChecks()
         runQuickCareChecks()
         runTemperatureReminderChecks()
+        runReminderDeliveryChecks()
+        runNotificationPermissionRefreshChecks()
         runStatusReadoutChecks()
+        runLoginStatusChecks()
         runChargeStateChecks()
         BatterySamplingChecks.run()
         print("Sampling policy checks passed: visible dashboards, 15-second cadence, sleep generations, invalid values and power sources.")

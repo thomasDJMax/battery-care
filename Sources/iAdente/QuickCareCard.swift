@@ -9,8 +9,10 @@ struct QuickCareCard: View {
     let onDefault: () -> Void
     let onSystemSettings: () -> Void
     let onDismissFeedback: () -> Void
+    var onAcknowledgeLegacyRecovery: (() -> Void)? = nil
 
     @State private var showsFeatureNotes = false
+    @State private var showsLegacyRecoveryConfirmation = false
     @Environment(\.interfaceMaterial) private var material
 
     var body: some View {
@@ -24,7 +26,9 @@ struct QuickCareCard: View {
                     Divider().overlay(Palette.line)
                     systemRow
                 }
-                if state.temporaryFull {
+                if state.temporaryFull && state.hasLegacyRecovery {
+                    legacyRecoveryControls
+                } else if state.temporaryFull {
                     informationLine("调整上限或系统管理前，请先恢复原设置。", color: Palette.orange)
                 }
                 if !state.isSupported {
@@ -35,6 +39,15 @@ struct QuickCareCard: View {
                     feedbackBanner(feedback)
                 }
             }
+        }
+        .confirmationDialog("结束旧恢复记录？", isPresented: $showsLegacyRecoveryConfirmation, titleVisibility: .visible) {
+            Button("保留当前系统设置，结束旧记录") {
+                guard state.canAcknowledgeLegacyRecovery else { return }
+                onAcknowledgeLegacyRecovery?()
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("请先确认已在系统电池设置中恢复为你需要的充电方式。继续将保留当前系统设置，结束旧记录；应用不会更改充电上限。")
         }
     }
 
@@ -115,11 +128,28 @@ struct QuickCareCard: View {
         .frame(minHeight: 34)
     }
 
+    private var legacyRecoveryControls: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            informationLine("旧记录缺少原管理方式，请先在系统电池设置中手动恢复。", color: Palette.orange)
+            HStack(spacing: 8) {
+                actionButton("系统电池设置", enabled: true, color: Palette.green, action: onSystemSettings)
+                Spacer(minLength: 0)
+                actionButton("已手动恢复", enabled: state.canAcknowledgeLegacyRecovery && onAcknowledgeLegacyRecovery != nil,
+                             color: Palette.orange) { showsLegacyRecoveryConfirmation = true }
+            }
+            Text(state.hasKnownState ? "保留当前系统设置，结束旧记录" : "尚未读到系统充电状态，请刷新后再确认。")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(Palette.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
     private var usesSystemDefault: Bool {
         state.hasBattery && state.isSupported && state.hasKnownState && !state.isEnabled && !state.temporaryFull
     }
 
     private var systemSubtitle: String {
+        if state.temporaryFull && state.hasLegacyRecovery { return "确认系统设置并结束旧记录后可切换" }
         if state.temporaryFull { return "先恢复临时模式的原设置" }
         if !state.hasBattery { return "未检测到内置电池" }
         if !state.isSupported { return "请使用系统电池设置" }

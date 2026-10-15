@@ -251,7 +251,8 @@ struct DashboardContent: View {
                       },
                       onDefault: coordinator.restoreSystemManagement,
                       onSystemSettings: coordinator.openSystemBattery,
-                      onDismissFeedback: { coordinator.banner = nil })
+                      onDismissFeedback: { coordinator.banner = nil },
+                      onAcknowledgeLegacyRecovery: { coordinator.acknowledgeLegacyRecovery() })
     }
     @ViewBuilder private var protectionPanel: some View {
         if staticRendering { protectionCard(at: Date()) }

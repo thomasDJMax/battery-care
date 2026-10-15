@@ -168,9 +168,10 @@ final class AppCoordinator: NSObject, ObservableObject, UNUserNotificationCenter
     var openSettingsHandler: (() -> Void)?
     var closePopoverHandler: (() -> Void)?
     private var subscriptions = Set<AnyCancellable>()
-    private var previousLimitNotice = false
-    private var previousLowNotice = false
-    private var lastScheduleDay: Date? = nil
+    private var limitReminderGate = ReminderDeliveryGate()
+    private var lowBatteryReminderGate = ReminderDeliveryGate()
+    private var dailyReminderGate: DailyReminderDeliveryGate
+    private var notificationPermissionRefresh = NotificationPermissionRefreshPolicy()
     private let temporaryStore = TemporaryChargeSessionStore()
     private var temporarySession: TemporaryChargeSession? = nil
     private var temporaryStarted: Date? { temporarySession?.startedAt }
@@ -192,12 +193,13 @@ final class AppCoordinator: NSObject, ObservableObject, UNUserNotificationCenter
     init(preview: Bool = false, renderingOnly: Bool = false) {
         self.preview = preview
         self.renderingOnly = renderingOnly
+        dailyReminderGate = DailyReminderDeliveryGate(defaults: preview || renderingOnly ? UserDefaults(suiteName: "cn.local.iadente.preview")! : .standard)
         settings = AppSettings(preview: preview)
         monitor = BatteryMonitor(preview: preview)
         charge = NativeChargeController(preview: preview)
         super.init()
         if !preview {
-            loginEnabled = SMAppService.mainApp.status == .enabled
+            refreshLoginStatus()
             updateNotificationStatus()
         }
         if !preview && !renderingOnly {
@@ -231,6 +233,14 @@ final class AppCoordinator: NSObject, ObservableObject, UNUserNotificationCenter
             self.temperatureNotificationMessage = nil
             self.processTemperatureReminder(self.monitor.snapshot, threshold: AppSettingBounds.temperature(threshold))
         }.store(in: &subscriptions)
+        // @Published emits before storing the new value. Reevaluate on the next
+        // main-queue turn so every gate sees the completed settings change.
+        settings.objectWillChange.sink { [weak self] _ in
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.processBatteryReminders(self.monitor.snapshot)
+            }
+        }.store(in: &subscriptions)
     }
     var chargeStatus: String {
         monitor.snapshot.statusText
@@ -240,7 +250,8 @@ final class AppCoordinator: NSObject, ObservableObject, UNUserNotificationCenter
                        hasKnownState: charge.hasKnownState, isEnabled: charge.isEnabled,
                        currentLimit: charge.currentLimit, temporaryFull: temporaryFull,
                        restoreDescription: temporaryRestoreDescription,
-                       pendingTemporaryStatus: pendingTemporaryStatus)
+                       pendingTemporaryStatus: pendingTemporaryStatus,
+                       hasLegacyRecovery: temporarySession != nil && temporaryRestoreEnabled == nil)
     }
     private var pendingTemporaryStatus: String? {
         if temporaryFull && temporaryRestoreEnabled == nil { return "恢复方式待确认" }
@@ -382,6 +393,27 @@ final class AppCoordinator: NSObject, ObservableObject, UNUserNotificationCenter
         }
     }
     func cancelTemporaryFull() { _ = restoreTemporaryFull() }
+    func acknowledgeLegacyRecovery() {
+        guard !preview && !renderingOnly, temporaryFull,
+              let session = temporarySession, session.originalEnabled == nil else { return }
+        charge.refresh()
+        guard charge.hasKnownState else {
+            banner = "暂时未能确认当前系统设置，旧记录已保留；请刷新后重试。"
+            return
+        }
+        do { try temporaryStore.acknowledgeLegacyRecovery(session, readback: charge.readback) }
+        catch {
+            banner = "未能结束旧恢复记录，记录和临时状态已保留，请稍后重试。"
+            return
+        }
+        // Only release the UI lock after the exact old record is consumed.
+        // This acknowledgement never submits a charging operation.
+        temporarySession = nil
+        temporaryFull = false
+        lastRestoreAttempt = nil
+        if let actual = charge.currentLimit { settings.limit = Double(actual) }
+        banner = "旧临时记录已结束，保留当前系统充电设置。"
+    }
     @discardableResult
     func restoreTemporaryFull(automatically: Bool = false) -> Bool {
         guard !renderingOnly else { banner = "仅渲染模式不更改系统充电设置。"; return false }
@@ -463,13 +495,24 @@ final class AppCoordinator: NSObject, ObservableObject, UNUserNotificationCenter
         banner = "原充电设置已恢复。"
         if shouldNotify { notify(title: "临时充满已完成", text: "已恢复原来的系统充电设置。") }
     }
+    func refreshLoginStatus(statusProvider: (() -> SMAppService.Status)? = nil) {
+        if let statusProvider {
+            loginEnabled = statusProvider() == .enabled
+            return
+        }
+        guard !preview && !renderingOnly else { return }
+        loginEnabled = SMAppService.mainApp.status == .enabled
+    }
     func setLogin(_ enabled: Bool) {
-        guard !preview else { return }
+        guard !preview && !renderingOnly else { return }
         do {
             if enabled { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
-            loginEnabled = SMAppService.mainApp.status == .enabled
+            refreshLoginStatus()
             if enabled && !loginEnabled { banner = "请在系统设置 → 通用 → 登录项中允许 \(AppIdentity.displayName)。" }
-        } catch { banner = "无法更改登录项：\(error.localizedDescription)" }
+        } catch {
+            refreshLoginStatus()
+            banner = "无法更改登录项：\(error.localizedDescription)"
+        }
     }
     func requestNotifications(forTemperatureReminder: Bool = false) {
         guard !preview && !renderingOnly else { return }
@@ -500,10 +543,17 @@ final class AppCoordinator: NSObject, ObservableObject, UNUserNotificationCenter
             }
         }
     }
-    func updateNotificationStatus() {
-        guard !preview else { return }
+    func updateNotificationStatus(force: Bool = true, now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        guard !preview && !renderingOnly else { return }
+        if !force {
+            guard settings.limitReminder || settings.lowBatteryReminder || settings.highTemperatureReminder || settings.scheduleEnabled else { return }
+        }
+        guard let token = notificationPermissionRefresh.begin(now: now, force: force) else { return }
         UNUserNotificationCenter.current().getNotificationSettings { [weak self] info in
-            DispatchQueue.main.async { self?.receiveNotificationSettings(info) }
+            DispatchQueue.main.async {
+                guard let self, self.notificationPermissionRefresh.complete(token) else { return }
+                self.receiveNotificationSettings(info)
+            }
         }
     }
     private func receiveNotificationSettings(_ info: UNNotificationSettings) {
@@ -519,6 +569,7 @@ final class AppCoordinator: NSObject, ObservableObject, UNUserNotificationCenter
             notificationStatus = notificationCanDeliver ? "已允许" : "通知已关闭"
             notificationDeliveryDescription = alerts ? "通知已允许" : (center ? "仅通知中心" : (notificationSoundAllowed ? "仅声音提醒" : "通知已关闭"))
         }
+        processBatteryReminders(monitor.snapshot)
     }
     private func processTemperatureReminder(_ snapshot: BatterySnapshot, enabled: Bool? = nil, threshold: Double? = nil) {
         guard !renderingOnly else { return }
@@ -596,30 +647,124 @@ final class AppCoordinator: NSObject, ObservableObject, UNUserNotificationCenter
         content.title = title; content.body = text; content.sound = .default
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
     }
+    private enum BatteryReminderKind { case limit, lowBattery }
+
+    /// Unknown or stale battery readings cannot end a previously notified
+    /// episode. They also cannot authorize a new notification.
+    private func synchronizeReminderGates(_ snapshot: BatterySnapshot, canNotify: Bool, now: Date)
+        -> (limit: ReminderNoticeCandidate?, low: ReminderNoticeCandidate?, daily: DailyReminderCandidate?) {
+        let fresh = snapshot.hasBattery && (-5...120).contains(now.timeIntervalSince(snapshot.updatedAt))
+        let percentage = fresh ? snapshot.percentage.flatMap { (0...100).contains($0) ? $0 : nil } : nil
+        let limit = limitReminderGate.consider(
+            condition: percentage.map { snapshot.isPluggedIn && $0 >= Int(settings.limit) },
+            threshold: Int(settings.limit), enabled: settings.limitReminder, canNotify: canNotify, now: now)
+        let low = lowBatteryReminderGate.consider(
+            condition: percentage.map { !snapshot.isPluggedIn && $0 <= Int(settings.lowBatteryThreshold) },
+            threshold: Int(settings.lowBatteryThreshold), enabled: settings.lowBatteryReminder, canNotify: canNotify, now: now)
+        let daily = dailyReminderGate.consider(
+            enabled: settings.scheduleEnabled, hour: settings.scheduleHour, minute: settings.scheduleMinute,
+            canNotify: canNotify, now: now)
+        return (limit, low, daily)
+    }
+
+    private func processBatteryReminders(_ snapshot: BatterySnapshot) {
+        guard !preview && !renderingOnly else { return }
+        // Poll permission independently of reminder candidates: a cached denial
+        // cannot prevent noticing a later change in System Settings. The policy
+        // bounds background reads and prevents callback-driven reentrancy.
+        updateNotificationStatus(force: false)
+        let candidates = synchronizeReminderGates(snapshot, canNotify: notificationCanDeliver, now: Date())
+        if let candidate = candidates.limit, let percentage = snapshot.percentage {
+            submitBatteryReminder(candidate, kind: .limit, percentage: percentage)
+        }
+        if let candidate = candidates.low, let percentage = snapshot.percentage {
+            submitBatteryReminder(candidate, kind: .lowBattery, percentage: percentage)
+        }
+        if let candidate = candidates.daily {
+            postReminder(identifier: candidate.identifier,
+                         title: "每日电池养护提醒",
+                         text: "查看电池状态、连接电源和充电上限，保持良好的电池习惯。",
+                         isCurrent: { [weak self] in self?.dailyReminderGate.isPending(candidate) == true },
+                         completion: { [weak self] succeeded in
+                             guard let self else { return }
+                             self.dailyReminderGate.complete(candidate, succeeded: succeeded, now: Date())
+                         })
+        }
+    }
+
+    private func submitBatteryReminder(_ candidate: ReminderNoticeCandidate, kind: BatteryReminderKind, percentage: Int) {
+        let title: String
+        let text: String
+        switch kind {
+        case .limit:
+            title = "电量已达到上限"
+            text = "当前电量 \(percentage)%，设定上限 \(Int(settings.limit))%。"
+        case .lowBattery:
+            title = "低电量提醒"
+            text = "电量剩余 \(percentage)%，请连接电源。"
+        }
+        postReminder(identifier: "battery-reminder-\(candidate.id.uuidString)", title: title, text: text,
+                     isCurrent: { [weak self] in
+                         guard let self else { return false }
+                         switch kind {
+                         case .limit: return self.limitReminderGate.isPending(candidate)
+                         case .lowBattery: return self.lowBatteryReminderGate.isPending(candidate)
+                         }
+                     }, willSubmit: { [weak self] in
+                         guard let self else { return }
+                         switch kind {
+                         case .limit: self.limitReminderGate.markSubmitted(candidate)
+                         case .lowBattery: self.lowBatteryReminderGate.markSubmitted(candidate)
+                         }
+                     }, completion: { [weak self] succeeded in
+                         guard let self else { return }
+                         switch kind {
+                         case .limit: self.limitReminderGate.complete(candidate, succeeded: succeeded, now: Date())
+                         case .lowBattery: self.lowBatteryReminderGate.complete(candidate, succeeded: succeeded, now: Date())
+                         }
+                     })
+    }
+
+    /// Both async boundaries recheck the current episode. An old completion
+    /// must not consume a reminder after an option, threshold or date changes.
+    private func postReminder(identifier: String, title: String, text: String,
+                              isCurrent: @escaping () -> Bool, willSubmit: @escaping () -> Void = {},
+                              completion: @escaping (Bool) -> Void) {
+        UNUserNotificationCenter.current().getNotificationSettings { [weak self] info in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.receiveNotificationSettings(info)
+                _ = self.synchronizeReminderGates(self.monitor.snapshot, canNotify: false, now: Date())
+                guard isCurrent(), self.notificationCanDeliver else { completion(false); return }
+                let content = UNMutableNotificationContent()
+                content.title = title
+                content.body = text
+                if self.notificationSoundAllowed { content.sound = .default }
+                let request = UNNotificationRequest(identifier: identifier, content: content, trigger: nil)
+                willSubmit()
+                UNUserNotificationCenter.current().add(request) { [weak self] error in
+                    DispatchQueue.main.async {
+                        guard let self else { return }
+                        _ = self.synchronizeReminderGates(self.monitor.snapshot, canNotify: false, now: Date())
+                        guard isCurrent() else { return }
+                        completion(error == nil)
+                        self.banner = error == nil ? text : "提醒暂未提交，将稍后重试。"
+                    }
+                }
+            }
+        }
+    }
+
     private func handle(_ snapshot: BatterySnapshot) {
         guard !renderingOnly else { return }
         processTemperatureReminder(snapshot)
         if temporaryFull || chargeActions.pending != nil { refreshChargeState() }
+        processBatteryReminders(snapshot)
         if let percentage = snapshot.percentage {
-            let limitReached = snapshot.isPluggedIn && percentage >= Int(settings.limit)
-            if settings.limitReminder && limitReached && !previousLimitNotice { notify(title: "电量已达到上限", text: "当前电量 \(percentage)%，设定上限 \(Int(settings.limit))%。") }
-            previousLimitNotice = limitReached
-            let low = !snapshot.isPluggedIn && percentage <= Int(settings.lowBatteryThreshold)
-            if settings.lowBatteryReminder && low && !previousLowNotice { notify(title: "低电量提醒", text: "电量剩余 \(percentage)%，请连接电源。") }
-            previousLowNotice = low
             if temporaryFull && !temporaryAwaitingConfirmation && temporaryRestoreEnabled != nil && percentage >= 100, let started = temporaryStarted, Date().timeIntervalSince(started) > 30,
                lastRestoreAttempt == nil || Date().timeIntervalSince(lastRestoreAttempt!) > 30 {
                 lastRestoreAttempt = Date()
                 _ = restoreTemporaryFull(automatically: true)
-            }
-        }
-        if settings.scheduleEnabled {
-            let calendar = Calendar.current
-            let parts = calendar.dateComponents([.hour, .minute], from: Date())
-            let today = calendar.startOfDay(for: Date())
-            if parts.hour == settings.scheduleHour && parts.minute == settings.scheduleMinute && lastScheduleDay != today {
-                lastScheduleDay = today
-                notify(title: "每日电池养护提醒", text: "查看电池状态、连接电源和充电上限，保持良好的电池习惯。")
             }
         }
     }

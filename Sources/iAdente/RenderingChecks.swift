@@ -127,6 +127,8 @@ func renderQuickCareViews(to directory: String) throws {
         ("care-80.png", QuickCareState(snapshot: plugged, isSupported: true, hasKnownState: true, isEnabled: true, currentLimit: 80, temporaryFull: false, restoreDescription: "80% 上限"), "系统充电上限已设为 80%"),
         ("care-temporary.png", QuickCareState(snapshot: plugged, isSupported: true, hasKnownState: true, isEnabled: true, currentLimit: 100, temporaryFull: true, restoreDescription: "80% 上限"), "临时充至 100% 已开启，完成后恢复原来的充电设置。"),
         ("care-retry.png", QuickCareState(snapshot: plugged, isSupported: true, hasKnownState: false, isEnabled: false, currentLimit: nil, temporaryFull: true, restoreDescription: "80% 上限"), "暂时未能确认系统充电状态，原设置已保留，请稍后重试。"),
+        ("care-legacy-confirm.png", QuickCareState(snapshot: plugged, isSupported: true, hasKnownState: true, isEnabled: true, currentLimit: 80, temporaryFull: true, restoreDescription: "原设置（恢复方式待确认）", pendingTemporaryStatus: "恢复方式待确认", hasLegacyRecovery: true), nil),
+        ("care-legacy-unknown.png", QuickCareState(snapshot: plugged, isSupported: true, hasKnownState: false, isEnabled: false, currentLimit: nil, temporaryFull: true, restoreDescription: "原设置（恢复方式待确认）", pendingTemporaryStatus: "恢复方式待确认", hasLegacyRecovery: true), nil),
         ("care-unplugged.png", QuickCareState(snapshot: unplugged, isSupported: true, hasKnownState: true, isEnabled: false, currentLimit: 100, temporaryFull: false, restoreDescription: "系统默认管理"), nil),
         ("care-unknown.png", QuickCareState(snapshot: missing, isSupported: true, hasKnownState: false, isEnabled: false, currentLimit: nil, temporaryFull: false, restoreDescription: "系统默认管理"), nil),
         ("care-unsupported.png", QuickCareState(snapshot: plugged, isSupported: false, hasKnownState: false, isEnabled: false, currentLimit: nil, temporaryFull: false, restoreDescription: "系统默认管理"), nil)
@@ -134,7 +136,8 @@ func renderQuickCareViews(to directory: String) throws {
     for (name, state, feedback) in states {
         let content = QuickCareCard(state: state, feedback: feedback,
                                     onPreset: { _ in }, onTemporary: {}, onDefault: {},
-                                    onSystemSettings: {}, onDismissFeedback: {})
+                                    onSystemSettings: {}, onDismissFeedback: {},
+                                    onAcknowledgeLegacyRecovery: {})
             .padding(18).frame(width: 410).background(Palette.background)
             .environment(\.staticRendering, true).environment(\.colorScheme, .dark)
         let renderer = ImageRenderer(content: content)
@@ -145,7 +148,7 @@ func renderQuickCareViews(to directory: String) throws {
         }
         try png.write(to: URL(fileURLWithPath: directory).appendingPathComponent(name))
     }
-    print("Rendered quick care: live, 80%, temporary full, restore retry, unplugged, unknown and unsupported. No actions executed.")
+    print("Rendered quick care: live, 80%, temporary full, restore retry, manual legacy recovery, unknown legacy state, unplugged, unknown and unsupported. No actions executed.")
 }
 
 @MainActor
@@ -166,6 +169,18 @@ func runQuickCareChecks() {
     precondition(awaiting.statusText == "临时请求待确认" && awaiting.temporarySubtitle.contains("原设置已保留"))
     precondition(temporary.canToggleTemporary && !temporary.canApplyPreset && !temporary.canRestoreSystem)
     precondition(!temporary.isPresetActive(80) && !temporary.isPresetActive(90))
+    precondition(!temporary.canAcknowledgeLegacyRecovery)
+    var legacy = temporary
+    legacy.hasLegacyRecovery = true
+    precondition(legacy.canAcknowledgeLegacyRecovery && !legacy.canToggleTemporary)
+    precondition(!legacy.canApplyPreset && !legacy.canRestoreSystem)
+    precondition(legacy.temporarySubtitle.contains("旧记录缺少原管理方式"))
+    var unknownLegacy = state(sample, known: false, limit: nil, temporary: true)
+    unknownLegacy.hasLegacyRecovery = true
+    precondition(!unknownLegacy.canAcknowledgeLegacyRecovery && !unknownLegacy.canToggleTemporary)
+    var endedLegacy = state(sample)
+    endedLegacy.hasLegacyRecovery = true
+    precondition(!endedLegacy.canAcknowledgeLegacyRecovery)
     sample.isPluggedIn = false
     let unplugged = state(sample)
     precondition(!unplugged.canToggleTemporary && unplugged.canApplyPreset && unplugged.canRestoreSystem)

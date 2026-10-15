@@ -129,6 +129,21 @@ final class TemporaryChargeSessionStore {
         try clear()
         return session.automaticCompletionNoticePending
     }
+    /// Consume only an exact legacy recovery point after explicit manual confirmation.
+    /// This never infers an original management mode or authorizes a hardware write.
+    func acknowledgeLegacyRecovery(_ session: TemporaryChargeSession, readback: ChargeLimitReadback) throws {
+        guard readback.known, session.isValid, session.originalEnabled == nil else {
+            throw CocoaError(.coderInvalidValue)
+        }
+        // Read failure, a missing record, or a different recovery point must leave
+        // the active lock intact. Cleanup failure likewise remains retryable.
+        let current = try JSONDecoder().decode(TemporaryChargeSession.self, from: Data(contentsOf: url))
+        guard current.isValid, current.originalEnabled == nil, current == session else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        try clear()
+    }
+
     private func removeLegacyKeys() { Self.legacyKeys.forEach { defaults.removeObject(forKey: $0) } }
 }
 
@@ -212,6 +227,37 @@ func runChargeStateChecks() {
         let incomplete = store.load().session!
         precondition(incomplete.originalEnabled == nil)
         precondition(!incomplete.confirmsRestoration(ChargeLimitReadback(known: true, enabled: false, limit: 100)))
+        let unknownReadback = ChargeLimitReadback(known: false, enabled: false, limit: nil)
+        let systemReadback = ChargeLimitReadback(known: true, enabled: false, limit: 100)
+        do {
+            try store.acknowledgeLegacyRecovery(incomplete, readback: unknownReadback)
+            preconditionFailure("Unknown system state cannot acknowledge manual recovery")
+        } catch { precondition(store.load().session == incomplete) }
+        var mismatchedLegacy = incomplete
+        mismatchedLegacy.originalLimit = 80
+        do {
+            try store.acknowledgeLegacyRecovery(mismatchedLegacy, readback: systemReadback)
+            preconditionFailure("A stale legacy confirmation cannot clear the active recovery record")
+        } catch { precondition(store.load().session == incomplete) }
+        do {
+            try failingCleanup.acknowledgeLegacyRecovery(incomplete, readback: systemReadback)
+            preconditionFailure("Legacy cleanup failure must remain retryable")
+        } catch { precondition(store.load().session == incomplete) }
+        // The user's current setting can differ from the saved limit: we preserve
+        // their explicit manual choice, rather than infer a missing original flag.
+        try store.acknowledgeLegacyRecovery(incomplete, readback: systemReadback)
+        precondition(store.load().session == nil && defaults.object(forKey: "temporaryRestoreLimit") == nil)
+        for readback in [ChargeLimitReadback(known: true, enabled: true, limit: 80),
+                         ChargeLimitReadback(known: true, enabled: true, limit: 90)] {
+            try store.save(incomplete)
+            try store.acknowledgeLegacyRecovery(incomplete, readback: readback)
+            precondition(store.load().session == nil)
+        }
+        try store.save(prepared)
+        do {
+            try store.acknowledgeLegacyRecovery(prepared, readback: systemReadback)
+            preconditionFailure("A complete recovery record cannot be dismissed as legacy")
+        } catch { precondition(store.load().session == prepared) }
         try store.clear()
         try Data("broken".utf8).write(to: url)
         precondition(store.load().session == nil && store.load().warning != nil)
@@ -224,5 +270,5 @@ func runChargeStateChecks() {
         precondition(blocked.load().session?.originalLimit == 80)
         precondition(defaults.object(forKey: "temporaryRestoreLimit") != nil)
     } catch { preconditionFailure("Charge state persistence checks failed: \(error)") }
-    print("Charge state checks passed: bounded preferences, delayed disable confirmation, single completion, atomic recovery records and conservative legacy migration. No native writes or notifications.")
+    print("Charge state checks passed: bounded preferences, delayed disable confirmation, single completion, atomic recovery records, conservative legacy migration and explicit manual legacy acknowledgement. No native writes or notifications.")
 }
