@@ -99,8 +99,20 @@ final class TemporaryChargeSessionStore {
             } catch { damagedRecord = true }
         }
         guard let limit = defaults.object(forKey: "temporaryRestoreLimit") as? Int, (1...100).contains(limit) else {
+            if damagedRecord {
+                // An unreadable record can never restore anything, and keeping it
+                // would repeat this warning on every launch. The file and the
+                // legacy keys both failed to produce a session, so remove the
+                // unusable file; the user is still told to check the system cap.
+                do {
+                    try removeRecord(url)
+                    return TemporarySessionLoad(warning: "临时充满恢复记录已损坏，已清除；请在系统电池设置中确认充电上限。")
+                } catch {
+                    return TemporarySessionLoad(warning: "临时充满恢复记录已损坏且无法清除；请在系统电池设置中确认充电上限。")
+                }
+            }
             let hasLegacy = Self.legacyKeys.contains { defaults.object(forKey: $0) != nil }
-            return TemporarySessionLoad(warning: damagedRecord || hasLegacy ? "临时充满恢复记录不完整，已保留原记录；请在系统电池设置中确认充电上限。" : nil)
+            return TemporarySessionLoad(warning: hasLegacy ? "临时充满恢复记录不完整，已保留原记录；请在系统电池设置中确认充电上限。" : nil)
         }
         let enabled = defaults.object(forKey: "temporaryRestoreEnabled") as? Bool
         let phase: TemporaryChargeSession.Phase = defaults.bool(forKey: "temporaryRestorePending") ? .restoring :
@@ -260,8 +272,26 @@ func runChargeStateChecks() {
         } catch { precondition(store.load().session == prepared) }
         try store.clear()
         try Data("broken".utf8).write(to: url)
-        precondition(store.load().session == nil && store.load().warning != nil)
+        let damaged = store.load()
+        precondition(damaged.session == nil && damaged.warning != nil)
+        // An unreadable record holds no recovery point: remove it instead of
+        // repeating the warning on every launch.
+        precondition(!FileManager.default.fileExists(atPath: url.path))
+        precondition(store.load().warning == nil && store.load().session == nil)
+        // A failed cleanup keeps both the file and the warning for a later retry.
+        try Data("broken".utf8).write(to: url)
+        let stuckCleanup = TemporaryChargeSessionStore(url: url, defaults: defaults,
+            removeRecord: { _ in throw CocoaError(.fileWriteNoPermission) })
+        precondition(stuckCleanup.load().session == nil && stuckCleanup.load().warning != nil)
         precondition(FileManager.default.fileExists(atPath: url.path))
+        // A valid legacy recovery point is migrated over the damaged file rather
+        // than being discarded with it.
+        defaults.set(70, forKey: "temporaryRestoreLimit")
+        defaults.set(true, forKey: "temporaryRestoreEnabled")
+        let migratedOverDamaged = store.load()
+        precondition(migratedOverDamaged.session?.originalLimit == 70 && migratedOverDamaged.warning == nil)
+        precondition(FileManager.default.fileExists(atPath: url.path))
+        try store.clear()
         // A failed migration preserves every old key, instead of erasing recovery data.
         let blockedURL = directory.appendingPathComponent("blocked")
         try Data().write(to: blockedURL)
@@ -270,5 +300,5 @@ func runChargeStateChecks() {
         precondition(blocked.load().session?.originalLimit == 80)
         precondition(defaults.object(forKey: "temporaryRestoreLimit") != nil)
     } catch { preconditionFailure("Charge state persistence checks failed: \(error)") }
-    print("Charge state checks passed: bounded preferences, delayed disable confirmation, single completion, atomic recovery records, conservative legacy migration and explicit manual legacy acknowledgement. No native writes or notifications.")
+    print("Charge state checks passed: bounded preferences, delayed disable confirmation, single completion, atomic recovery records, damaged-record cleanup, conservative legacy migration and explicit manual legacy acknowledgement. No native writes or notifications.")
 }
