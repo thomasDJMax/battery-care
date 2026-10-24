@@ -90,6 +90,46 @@ func runTemperatureReminderChecks() {
     precondition(consider(&futureSuccess, 41, at: 659) == nil)
     precondition(consider(&futureSuccess, 41, at: 660) != nil)
 
+    // A backwards wall-clock correction must re-base the sample history instead
+    // of dropping every reading until the old clock catches up.
+    var rollbackSample = TemperatureReminderGate()
+    precondition(consider(&rollbackSample, 41, at: 1_000) == nil)
+    precondition(consider(&rollbackSample, 41, at: 100) == nil)
+    let afterRollback = consider(&rollbackSample, 41, at: 105)!
+    precondition(afterRollback.temperature == 41)
+    precondition(rollbackSample.complete(afterRollback, succeeded: true, now: start.addingTimeInterval(105)))
+
+    // Cooldown is measured from the correction, not from a timestamp that the
+    // rollback left eleven minutes in the future.
+    var rollbackCooldown = TemperatureReminderGate()
+    precondition(consider(&rollbackCooldown, 41, at: 1_000) == nil)
+    let notifiedBeforeRollback = consider(&rollbackCooldown, 41, at: 1_005)!
+    precondition(rollbackCooldown.complete(notifiedBeforeRollback, succeeded: true, now: start.addingTimeInterval(1_005)))
+    precondition(consider(&rollbackCooldown, 37, at: 100) == nil)
+    precondition(consider(&rollbackCooldown, 37, at: 105) == nil)
+    precondition(consider(&rollbackCooldown, 41, at: 110) == nil)
+    precondition(consider(&rollbackCooldown, 41, at: 115) == nil)
+    precondition(consider(&rollbackCooldown, 41, at: 699) == nil)
+    let afterCooldownRebase = consider(&rollbackCooldown, 41, at: 700)!
+    precondition(rollbackCooldown.complete(afterCooldownRebase, succeeded: true, now: start.addingTimeInterval(700)))
+
+    // A failed delivery stays retryable sixty seconds after the correction.
+    var rollbackRetry = TemperatureReminderGate()
+    precondition(consider(&rollbackRetry, 41, at: 1_000) == nil)
+    let failedBeforeRollback = consider(&rollbackRetry, 41, at: 1_005)!
+    precondition(!rollbackRetry.complete(failedBeforeRollback, succeeded: false, now: start.addingTimeInterval(1_005)))
+    precondition(consider(&rollbackRetry, 41, at: 100) == nil)
+    precondition(consider(&rollbackRetry, 41, at: 159) == nil)
+    precondition(consider(&rollbackRetry, 41, at: 160) != nil)
+
+    // A persisted success date left in the future by a rollback cannot block
+    // the whole cooldown: the first observation re-bases it onto the new clock.
+    var restartedRollback = TemperatureReminderGate(lastNotifiedAt: start.addingTimeInterval(10_000))
+    precondition(consider(&restartedRollback, 41, at: 600) == nil)
+    precondition(consider(&restartedRollback, 41, at: 605) == nil)
+    precondition(consider(&restartedRollback, 41, at: 1_199) == nil)
+    precondition(consider(&restartedRollback, 41, at: 1_200) != nil)
+
     // Disable and threshold changes invalidate pending callbacks before any
     // sample/permission early return, while retaining successful cooldown.
     var configuration = TemperatureReminderGate()
@@ -181,5 +221,5 @@ func runTemperatureReminderChecks() {
     precondition(consider(&gap, 41, at: 121) == nil)
     precondition(consider(&gap, 41, at: 126) != nil)
 
-    print("Temperature reminder checks passed: distinct sampling, hysteresis, permissions, cooldown, retries and obsolete completions.")
+    print("Temperature reminder checks passed: distinct sampling, hysteresis, permissions, cooldown, retries, obsolete completions and wall-clock correction.")
 }

@@ -22,6 +22,7 @@ struct TemperatureReminderGate {
     private var pending: TemperatureNoticeCandidate?
     private var lastFailedAt: Date?
     private(set) var lastNotifiedAt: Date?
+    private var lastObservedAt: Date?
 
     init(lastNotifiedAt: Date? = nil) {
         self.lastNotifiedAt = lastNotifiedAt.flatMap {
@@ -31,6 +32,8 @@ struct TemperatureReminderGate {
 
     mutating func consider(snapshot: BatterySnapshot, threshold: Double, enabled: Bool,
                            canNotify: Bool, now: Date) -> TemperatureNoticeCandidate? {
+        guard now.timeIntervalSinceReferenceDate.isFinite else { return nil }
+        observeClock(now)
         // Configuration changes invalidate in-flight completions even when the
         // accompanying sample is unavailable. Successful cooldown survives.
         guard enabled, threshold.isFinite, (35...55).contains(threshold) else {
@@ -43,8 +46,7 @@ struct TemperatureReminderGate {
             configuredThreshold = threshold
         }
 
-        guard now.timeIntervalSinceReferenceDate.isFinite,
-              snapshot.hasBattery,
+        guard snapshot.hasBattery,
               let temperature = snapshot.temperature, temperature.isFinite,
               temperature > 0, temperature < 90,
               snapshot.updatedAt.timeIntervalSinceReferenceDate.isFinite else { return nil }
@@ -99,6 +101,7 @@ struct TemperatureReminderGate {
                            now: Date) -> Bool {
         guard now.timeIntervalSinceReferenceDate.isFinite,
               pending?.id == candidate.id else { return false }
+        observeClock(now)
         pending = nil
         if succeeded {
             lastNotifiedAt = now
@@ -122,5 +125,22 @@ struct TemperatureReminderGate {
         armed = true
         pending = nil
         lastFailedAt = nil
+    }
+
+    /// Wall-clock readings can move backwards after a manual change, a restored
+    /// VM snapshot or a large NTP step. A sample or delivery stamp left in the
+    /// future would otherwise drop every new sample and defer cooldown/retry
+    /// until the old clock catches up, so rebase them onto the corrected clock.
+    private mutating func observeClock(_ now: Date) {
+        if let previous = lastObservedAt, now < previous {
+            // Sample streaks counted on the old clock cannot be trusted.
+            lastSampleAt = nil
+            hotSamples = 0
+            coolSamples = 0
+        }
+        lastObservedAt = now
+        // lastNotifiedAt survives a restart, so it can still be in the future.
+        if let notified = lastNotifiedAt, notified > now { lastNotifiedAt = now }
+        if let failed = lastFailedAt, failed > now { lastFailedAt = now }
     }
 }
