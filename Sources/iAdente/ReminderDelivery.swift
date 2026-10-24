@@ -8,12 +8,31 @@ struct ReminderNoticeCandidate: Equatable, Sendable {
 /// charge limit. Permission and successful submission are separate: observing
 /// the condition without permission must never consume the event.
 struct ReminderDeliveryGate {
+    private let defaults: UserDefaults?
+    private let persistenceKey: String?
     private var configuredThreshold: Int?
     private var delivered = false
     private var pending: ReminderNoticeCandidate?
     private var pendingSubmitted = false
     private var lastFailedAt: Date?
     private var lastObservedAt: Date?
+
+    init() {
+        defaults = nil
+        persistenceKey = nil
+    }
+
+    /// Persists the delivered flag and its threshold so one episode cannot
+    /// notify twice when the app restarts while its condition still holds. The
+    /// record is cleared as soon as the condition ends, the reminder is disabled
+    /// or its threshold changes.
+    init(defaults: UserDefaults, key: String) {
+        self.defaults = defaults
+        persistenceKey = key
+        let record = defaults.dictionary(forKey: key)
+        delivered = record?["delivered"] as? Bool ?? false
+        configuredThreshold = record?["threshold"] as? Int
+    }
 
     mutating func consider(condition: Bool?, threshold: Int, enabled: Bool,
                            canNotify: Bool, now: Date) -> ReminderNoticeCandidate? {
@@ -26,11 +45,13 @@ struct ReminderDeliveryGate {
         guard enabled else {
             resetEpisode()
             configuredThreshold = nil
+            persistEpisode()
             return nil
         }
         if configuredThreshold != threshold {
             resetEpisode()
             configuredThreshold = threshold
+            persistEpisode()
         }
         guard let condition else {
             // Missing telemetry cannot prove that the event ended. Cancel a
@@ -41,6 +62,7 @@ struct ReminderDeliveryGate {
         }
         guard condition else {
             resetEpisode()
+            persistEpisode()
             return nil
         }
         guard canNotify, !delivered, pending == nil else { return nil }
@@ -78,6 +100,7 @@ struct ReminderDeliveryGate {
         if succeeded {
             delivered = true
             lastFailedAt = nil
+            persistEpisode()
             return true
         }
         lastFailedAt = now
@@ -89,6 +112,20 @@ struct ReminderDeliveryGate {
         pending = nil
         pendingSubmitted = false
         lastFailedAt = nil
+    }
+
+    private func persistEpisode() {
+        guard let defaults, let persistenceKey else { return }
+        guard delivered || configuredThreshold != nil else {
+            if defaults.object(forKey: persistenceKey) != nil {
+                defaults.removeObject(forKey: persistenceKey)
+            }
+            return
+        }
+        var record: [String: Any] = [:]
+        if delivered { record["delivered"] = true }
+        if let configuredThreshold { record["threshold"] = configuredThreshold }
+        defaults.set(record, forKey: persistenceKey)
     }
 
     private mutating func observeClock(_ now: Date) {

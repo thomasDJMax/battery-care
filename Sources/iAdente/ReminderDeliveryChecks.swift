@@ -113,6 +113,69 @@ func runReminderDeliveryChecks() {
     precondition(invalid.consider(condition: true, threshold: 20, enabled: true,
                                   canNotify: true, now: Date(timeIntervalSinceReferenceDate: .infinity)) == nil)
 
+    // A delivered charge-limit or low-battery episode stays consumed across a
+    // restart while its condition still holds. Resolving the condition,
+    // disabling the reminder or changing the threshold clears the stored episode.
+    let episodeSuite = "BatteryCare.ReminderDeliveryGate.\(UUID().uuidString)"
+    let episodeDefaults = UserDefaults(suiteName: episodeSuite)!
+    defer { episodeDefaults.removePersistentDomain(forName: episodeSuite) }
+    func considerPersisted(_ gate: inout ReminderDeliveryGate, _ seconds: TimeInterval,
+                           condition: Bool? = true, threshold: Int = 20, enabled: Bool = true,
+                           canNotify: Bool = true) -> ReminderNoticeCandidate? {
+        gate.consider(condition: condition, threshold: threshold, enabled: enabled,
+                      canNotify: canNotify, now: at(seconds))
+    }
+
+    func deliveredFlag(_ key: String) -> Bool? {
+        episodeDefaults.dictionary(forKey: key)?["delivered"] as? Bool
+    }
+
+    var persistedLimit = ReminderDeliveryGate(defaults: episodeDefaults, key: "limit")
+    let firstEpisode = considerPersisted(&persistedLimit, 0)!
+    precondition(persistedLimit.complete(firstEpisode, succeeded: true, now: at(1)))
+    precondition(deliveredFlag("limit") == true)
+    var limitRestart = ReminderDeliveryGate(defaults: episodeDefaults, key: "limit")
+    precondition(considerPersisted(&limitRestart, 2) == nil) // No duplicate after restart.
+    precondition(considerPersisted(&limitRestart, 3, condition: false, canNotify: false) == nil)
+    precondition(deliveredFlag("limit") == nil) // The ended episode cannot suppress the next one.
+    let secondEpisode = considerPersisted(&limitRestart, 3_603)!
+    precondition(secondEpisode.id != firstEpisode.id)
+    precondition(limitRestart.complete(secondEpisode, succeeded: true, now: at(3_604)))
+
+    // A failed submission never marks the episode delivered.
+    var failedEpisode = ReminderDeliveryGate(defaults: episodeDefaults, key: "failure")
+    let failedToken = considerPersisted(&failedEpisode, 4_000)!
+    precondition(!failedEpisode.complete(failedToken, succeeded: false, now: at(4_001)))
+    precondition(deliveredFlag("failure") == nil)
+
+    // Disabling the reminder or changing the threshold ends the stored episode.
+    var clearedByDisable = ReminderDeliveryGate(defaults: episodeDefaults, key: "disable")
+    let disabledToken = considerPersisted(&clearedByDisable, 5_000)!
+    precondition(clearedByDisable.complete(disabledToken, succeeded: true, now: at(5_001)))
+    precondition(deliveredFlag("disable") == true)
+    precondition(considerPersisted(&clearedByDisable, 5_002, enabled: false, canNotify: false) == nil)
+    precondition(episodeDefaults.object(forKey: "disable") == nil)
+    var clearedByThreshold = ReminderDeliveryGate(defaults: episodeDefaults, key: "threshold")
+    let thresholdToken = considerPersisted(&clearedByThreshold, 6_000)!
+    precondition(clearedByThreshold.complete(thresholdToken, succeeded: true, now: at(6_001)))
+    precondition(deliveredFlag("threshold") == true)
+    precondition(considerPersisted(&clearedByThreshold, 6_002, threshold: 25, canNotify: false) == nil)
+    precondition(deliveredFlag("threshold") == nil)
+
+    // A threshold changed between launches must not inherit the old delivery.
+    var changedBeforeLaunch = ReminderDeliveryGate(defaults: episodeDefaults, key: "changed")
+    let unchangedToken = considerPersisted(&changedBeforeLaunch, 8_000, threshold: 20)!
+    precondition(changedBeforeLaunch.complete(unchangedToken, succeeded: true, now: at(8_001)))
+    precondition(deliveredFlag("changed") == true)
+    var changedAfterLaunch = ReminderDeliveryGate(defaults: episodeDefaults, key: "changed")
+    precondition(considerPersisted(&changedAfterLaunch, 8_002, threshold: 30) != nil)
+
+    // Without injected defaults the gate keeps its memory-only behavior.
+    var memoryOnly = ReminderDeliveryGate()
+    let memoryToken = considerPersisted(&memoryOnly, 7_000)!
+    precondition(memoryOnly.complete(memoryToken, succeeded: true, now: at(7_001)))
+    precondition(considerPersisted(&memoryOnly, 7_002) == nil)
+
     let suiteName = "BatteryCare.ReminderDeliveryChecks.\(UUID().uuidString)"
     let defaults = UserDefaults(suiteName: suiteName)!
     defer { defaults.removePersistentDomain(forName: suiteName) }
@@ -297,5 +360,5 @@ func runReminderDeliveryChecks() {
     let yesterday = calendar.date(byAdding: .day, value: -1, to: finalDay)!
     precondition(daily(&boundedRestart, yesterday) == nil)
 
-    print("Reminder delivery checks passed: enable/permission recovery, success-only consumption, retries, stale callbacks, daily persistence, leap months, display calendars, local time zones and clock correction.")
+    print("Reminder delivery checks passed: enable/permission recovery, success-only consumption, persisted episodes, retries, stale callbacks, daily persistence, leap months, display calendars, local time zones and clock correction.")
 }

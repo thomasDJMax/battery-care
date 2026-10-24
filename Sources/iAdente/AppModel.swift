@@ -194,6 +194,12 @@ final class AppCoordinator: NSObject, ObservableObject, UNUserNotificationCenter
         self.preview = preview
         self.renderingOnly = renderingOnly
         dailyReminderGate = DailyReminderDeliveryGate(defaults: preview || renderingOnly ? UserDefaults(suiteName: "cn.local.iadente.preview")! : .standard)
+        // The delivered state of a charge-limit/low-battery episode is persisted:
+        // the app is a login item and must not repeat a notice after a restart
+        // that happens while the condition still holds.
+        let reminderDefaults = preview || renderingOnly ? UserDefaults(suiteName: "cn.local.iadente.preview")! : .standard
+        limitReminderGate = ReminderDeliveryGate(defaults: reminderDefaults, key: "limitReminderDelivered")
+        lowBatteryReminderGate = ReminderDeliveryGate(defaults: reminderDefaults, key: "lowBatteryReminderDelivered")
         settings = AppSettings(preview: preview)
         monitor = BatteryMonitor(preview: preview)
         charge = NativeChargeController(preview: preview)
