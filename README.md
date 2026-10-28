@@ -63,11 +63,14 @@
 需要包含 macOS 26 或更高 SDK 的 Xcode／Command Line Tools；应用运行下限仍为 macOS 13。Swift 包工具版本为 5.9，当前应用在 Apple Silicon macOS 27.0.1、Swift 6.4 上通过验证。
 
 ```sh
-./build.sh
+./build.sh                 # 只构建当前机器架构
+./build.sh --universal     # 发布用：arm64 + x86_64 通用二进制
 open ../电池管家.app
 ```
 
-默认构建缓存在本目录 `.build`。可通过 `IA_BUILD_DIR` 环境变量指定其他构建缓存目录，或通过 `IA_APP_DEST` 指定待验证应用的输出路径。构建脚本默认生成相邻目录的 `电池管家.app`，并进行本地 ad-hoc 签名。没有联网依赖。
+默认构建缓存在本目录 `.build`。可通过 `IA_BUILD_DIR` 环境变量指定其他构建缓存目录，或通过 `IA_APP_DEST` 指定待验证应用的输出路径。构建脚本默认生成相邻目录的 `电池管家.app`，并进行本地 ad-hoc 签名。没有联网依赖。`IA_UNIVERSAL=1 ./build.sh` 等价于 `--universal`。
+
+发布用的 `.app` 与压缩包必须用 `--universal` 构建：脚本会交叉编译 `arm64` 与 `x86_64`，拷贝后校验二进制确实同时包含两种架构（缺失时以非零状态退出）。只含 `arm64` 的包在 Intel Mac 上无法启动，而 `Info.plist` 的最低系统版本是 macOS 13，发布包需要覆盖这一范围。交叉编译时出现 `x86_64 architecture is deprecated for your deployment target` 属于 Xcode 对旧架构的提示，不影响产物；两种架构的 `minos` 都是 13.0。
 
 ```sh
 ../电池管家.app/Contents/MacOS/BatteryCare --self-test
